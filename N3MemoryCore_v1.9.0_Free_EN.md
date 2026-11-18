@@ -3,20 +3,8 @@
 
 > **What is "Immutable Memory"?** Every save is physically committed to disk the instant it occurs — no buffering, no async writes. Even a forced kill of the process immediately after saving leaves the data intact. This is the core design principle of N3MC.
 >
-> **Who is this for?** Codex users who want persistent, searchable memory that survives across sessions — without manually maintaining CLAUDE.md.
+> **Who is this for?** Codex users who want persistent, searchable memory that survives across sessions — without manually maintaining AGENTS.md.
 >
-> **This review tested**: Windows / Python 3.12. Codex UI hook trust and fresh-chat testing, Linux and macOS were not verified in this review.
-
-## Codex review clarifications — 2026-11-18
-
-- If direct saving also fails, keep the warning and `save_failed` notice, then raise; the hook exits with status 1.
-- A prompt hook with Codex `thread_id` / `turn_id` does not resave a supplied previous answer. Stop owns answer capture with the same turn ID.
-- Detect and repair missing vector, trigram and bigram rows independently, including missing bigram rows after `fts_bigram=1` migration.
-- When identical search content is collapsed, take `id`, `timestamp`, `turn_id`, `session_id` and `agent_name` from the same newest record. Keep the highest ranking slot and its score.
-- Do not copy only a live WAL database. Follow the [SQLite backup API procedure](docs/BACKUP.md).
-
-See the [review and scorecard](docs/REVIEW_SCORECARD_20261118_JP.md) for evidence and limitations.
-
 ## ⚠️ Disclaimer & Distribution Terms
 
 This software and specification are provided **"AS-IS"** without warranty of any kind.
@@ -31,7 +19,7 @@ By using this software, you agree to the terms above.
 - **License**: Apache License 2.0. See the LICENSE file for details.
 
 > **Removal (Uninstall)**: To remove N3MemoryCore, do not delete the folder directly. Instead, ask Codex: "Please delete N3MemoryCore." This ensures the hook configuration is also properly removed.
-> **Backup before removal**: To carry over your memories, save the following two files before deletion: `n3memory.db` (memory data) and `config.json` (contains the `owner_id` and `local_id` UUIDv4 keys). These must be kept together — without the matching keys, owner verification and environment classification will not function correctly.
+> **Backup before removal**: To carry over your memories, save the following two files before deletion: `n3memory.db` (memory data) and `config.json` (contains the `owner_id` and `local_id` UUIDv4 identifiers). Keep them together to retain configuration and provenance. These IDs are not authentication keys. Use the SQLite backup API procedure above for a consistent snapshot of a running WAL database.
 
 > **For implementation questions**: While the author cannot be contacted for support, you can load this specification into Codex and ask questions directly — Codex can assist with implementation and customization.
 > **For customization**: When customizing N3MemoryCore, tell Codex where this specification file is and say "Please update the specification too." This specification itself was created that way.
@@ -52,32 +40,32 @@ By using this software, you agree to the terms above.
 
 There are two supported setup paths:
 
-**Path A — Quick Start with `pip`** (use the reference build directly)
+**Path A — AI-Native Setup** (regenerate from this specification)
+
+1. Load this specification into Codex and ask: "Please implement N3MemoryCore according to this specification."
+   - Codex implements the code and registers the hooks and configuration. Confirm the install folder first. After implementation, restart Codex, then inspect, trust and enable the hook commands. Open Codex in an empty folder such as `~/<name>` before starting.
+   - **💡 GPT-6 Sol is recommended for code generation.** It offers a good balance of speed, cost, and implementation quality.
+
+> **📖 After implementation (Path A only)**: Follow the **"Appendix: Recommended Development Workflow"** at the end of this document for user-operated checks.
+
+**Path B — Quick Start with `pip`** (use the reference build directly)
 
 ```bash
-git clone https://github.com/NeuralNexusNote/n3mc-free.git
-cd n3mc-free
+git clone https://github.com/NeuralNexusNote/n3mc-free-codex.git
+cd n3mc-free-codex
 pip install -e .          # editable install; or  pip install .
 n3mc --init               # creates ~/.n3mc/  and registers Codex hooks
 ```
 
-Then **restart Codex**. Memory kicks in from the next session.
-
-**Path B — AI-Native Setup** (regenerate from this specification)
-
-1. Load this specification into Codex and ask: "Please implement N3MemoryCore according to this specification."
-   - Code implementation, hook registration, and configuration file updates are all done automatically by Codex. The only step for you is to confirm the install folder at the start (see "Install folder check" below): open Codex in an empty folder such as `~/<name>` first.
-   - **💡 GPT-6 Sol is recommended for code generation.** It offers a good balance of speed, cost, and implementation quality.
-
-> **📖 After implementation (Path B only)**: Be sure to review **"Appendix: Recommended Development Workflow"** at the end of this document. It contains debugging and quality review steps (operated by you, the human).
+**Restart Codex**, then inspect, trust and enable both hooks in `/hooks`. Verify capture over multiple turns in a fresh chat before relying on it.
 
 ### Data Backup
 
-All memory data is stored under `~/.n3mc/`. To fully preserve your memories, back up both `~/.n3mc/.memory/n3memory.db` and `~/.n3mc/config.json` (which contains the `owner_id` and `local_id` UUIDv4 keys). The DB alone is sufficient for data recovery, but without the matching `config.json`, owner verification and environment classification will not function correctly. Override the data location with `N3MC_HOME=/path/to/dir` if you need it elsewhere.
+All memory data is stored under `~/.n3mc/`. To fully preserve your memories, back up both `~/.n3mc/.memory/n3memory.db` and `~/.n3mc/config.json` (which contains the `owner_id` and `local_id` UUIDv4 identifiers). The DB alone is sufficient for data recovery. IDs identify provenance; owner authentication is not implemented. Use SQLite backup API rather than copying only the live database file. Override the data location with `N3MC_HOME=/path/to/dir` in both CLI and Codex launch environments; `--init` does not persist this choice.
 
 ### Upgrading to Pro
 
-Load the Pro specification (distributed separately; use its latest version) into Codex and ask: "Please implement N3MemoryCore according to this specification." Your existing DB will be carried over as-is.
+Pro is distributed separately. Before migrating, make a consistent WAL-aware backup and verify the target instructions, database format and embedding model.
 
 ---
 
@@ -87,8 +75,8 @@ Exclude source code and accumulate high-density "intent, conclusions, and evalua
 
 > **Do NOT output manual command hints** (e.g., `n3mc --buffer "fact to save"`, `n3mc --search "keyword"`, `n3mc --list`) at any point during or after implementation.
 
-> **⚠️ Install folder check (Path B — do this first, before anything else)**: Path B writes the code into the folder Codex is open in (the current working directory): `pyproject.toml`, `README.md`, `tests/`, `n3memorycore/` and the other files of §2. That folder stays in use after setup: with `pip install -e .` the hooks run the code from it, so deleting or moving it later stops the memory from working.
-> 1. Show the user the absolute path of the current working directory and this message: "N3MemoryCore will be installed in this folder: <absolute path>. The code will stay here; deleting or moving this folder later stops the memory hooks. Continue? (yes/no)". **Wait for the user's answer.** Continue only on a clear yes. This is the only confirmation of the setup; everything after it runs automatically.
+> **⚠️ Install folder check (Path A — do this first, before anything else)**: Path A writes the code into the folder Codex is open in (the current working directory): `pyproject.toml`, `README.md`, `tests/`, `n3memorycore/` and the other files of §2. That folder stays in use after setup: with `pip install -e .` the hooks run the code from it, so deleting or moving it later stops the memory from working.
+> 1. Show the user the absolute path of the current working directory and this message: "N3MemoryCore will be installed in this folder: <absolute path>. The code will stay here; deleting or moving this folder later stops the memory hooks. Continue? (yes/no)". **Wait for the user's answer.** Continue implementation only on a clear yes. After setup, the user must separately trust and enable the hooks in Codex.
 > 2. Before asking, look at the folder. If it contains anything other than this specification file, `.claude/`, `.git/` and the files of an earlier setup of this product (`n3memorycore/`, `pyproject.toml` whose `name` is this package's), **do not ask: abort** and display: "This folder already contains other files (for example a project of yours). Setting up here could overwrite them. Create an empty folder such as `~/n3mc-free`, open Codex there, and run this setup again." Never overwrite or mix into an existing project.
 > 3. Do not install into the home folder itself (`~`) or a system folder.
 
@@ -153,7 +141,7 @@ n3mc-free/                       # Repository root
 │   ├── test_processor.py
 │   ├── test_regressions.py      # regression tests for the v1.4.0 – v1.6.0 fixes (no model needed, §7 Layer 5)
 │   ├── test_search_port_2026_11_17.py # 2026-11-17 search changes (no model needed, §7 Layer 5)
-│   ├── test_review_2026_11_17.py   # 2026-11-17 code review: chunk length bound, Windows hook paths (no model needed, §7 Layer 5)
+│   ├── test_chunk_hook_paths.py   # chunk length bound, Windows hook paths (no model needed, §7 Layer 5)
 │   └── test_index_meta.py       # meta table, model mismatch notice, --reembed (v1.8.0; no model needed, §7 Layer 5)
 ├── AGENTS.md                   # Codex usage guidance
 └── .venv/                      # Optional local Python environment
@@ -297,7 +285,7 @@ from .core.processor import (
 - **Port**: Default `18520` (configurable via `server_port` in `config.json`). When running another N3MC (e.g. the Pro edition) on the same PC, give each data folder its own `server_port`.
 - **Bind address**: `bind_host` (default `127.0.0.1`). **Keep the default.** The server API (search, list, `/shutdown`, etc.) has no authentication, so any other value exposes it to the network. If a value other than `127.0.0.1` is configured, print a warning to stderr at startup.
 - **Start Timing**: On execution of any `n3mc` subcommand (or `python -m n3memorycore.n3memory`), follow "Server check and replacement (`ensure_server`)" below and, if needed, automatically start the server in the background as `python -m n3memorycore.n3memory --run-server`. Write the PID file using an atomic operation (e.g., `open(..., 'x')` exclusive-create flag) to prevent duplicate launches when multiple processes check simultaneously.
-- **Communication**: HTTP over TCP (`http://127.0.0.1:{port}`). **Never through a proxy** (final review of 2026-11-18, F16): `_post` / `_get` open their requests with `urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=…)`, not `urllib.request.urlopen`. The default opener follows `HTTP_PROXY` and the system proxy settings: with a proxy and no `NO_PROXY` entry for `127.0.0.1` (common on company PCs), every request went to the proxy, the server looked down, each hook waited for the server start, the search said "still starting" and saves went in directly without a vector.
+- **Communication**: HTTP over TCP (`http://127.0.0.1:{port}`). **Never through a proxy**: `_post` / `_get` open their requests with `urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=…)`, not `urllib.request.urlopen`. The default opener follows `HTTP_PROXY` and the system proxy settings: with a proxy and no `NO_PROXY` entry for `127.0.0.1` (common on company PCs), every request went to the proxy, the server looked down, each hook waited for the server start, the search said "still starting" and saves went in directly without a vector.
 - **Host header check (v1.5.0)**: every endpoint returns 403 unless the request's `Host` header is `127.0.0.1:<port>` or `localhost:<port>`. A web page in the user's browser can otherwise reach the server through DNS rebinding (a name that resolves to 127.0.0.1) and read `GET /list`. The CLI always sends `Host: 127.0.0.1:<port>`; FastAPI's `TestClient` sends `testserver`, so tests set the header explicitly or replace the check.
 - **Endpoints do not block the event loop (v1.5.0)**: define the endpoints that embed or touch the DB (`/buffer`, `/search`, `/repair`, `/list`) with plain `def`, not `async def`, so FastAPI runs them in its thread pool and `/health` keeps answering during a long `/repair`. (In v1.4.0 they were `async def` with synchronous work inside; a long `/repair` made `/health` time out, the CLI concluded there was no server, and fell into the start/replace path.) The SQLite connection used by an endpoint is opened inside that endpoint call (one connection per request), never shared across threads.
 - **Health Monitoring**: On every CLI execution, PING the `/health` endpoint and use the response to decide whether the server is our own and running the latest code (see below).
@@ -341,7 +329,7 @@ The CLI classifies the `/health` response as follows (`_health_decision(health)`
 4. While `.memory/server_start_failed` is younger than 5 minutes, do not try to start the server again; go straight to the no-server path. This keeps a broken setup from costing every hook up to 60 seconds. Delete the marker and clear the notice once a server responds.
 5. If the child is still alive after 60 seconds, it is still starting (model download): leave it running and follow the "still starting" rule above.
 
-> **⚠️ Why (v1.5.0, found in the Free v1.4.0 review)**: v1.4.0 waited the full 60 seconds without looking at the child process and sent its stderr to `DEVNULL`. When the port was taken by another program or the server crashed at start, every hook stalled for 60 seconds and the reason was recorded nowhere.
+> **⚠️ Why**: v1.4.0 waited the full 60 seconds without looking at the child process and sent its stderr to `DEVNULL`. When the port was taken by another program or the server crashed at start, every hook stalled for 60 seconds and the reason was recorded nowhere.
 
 #### `/shutdown`
 
@@ -581,7 +569,7 @@ def _build_fts_query(query: str) -> str:
 ```
 
 - **INSERT side is unchanged** (`strip_fts_punctuation` removes punctuation and keeps words joined, as before), so no FTS re-registration or new migration marker is needed. Only the query side turns punctuation into spaces. Example: the stored `架空の惑星「アルファ9」の気温設定` is indexed as `架空の惑星アルファ9の気温設定`; the query `「アルファ9」の気温は？` becomes the terms `アルフ`, `ルファ`, `ファ9`, `の気温`, `気温は` (OR).
-- **Why OR (v1.5.0, found in the Free v1.4.0 review)**: v1.4.0 joined the quoted terms with AND (FTS5's implicit operator). The hook uses the whole user message as the query, so a sentence such as `what is the quick fox doing in my DB` returned 0 rows even when a record contained `quick` and `fox`, and a Japanese sentence without spaces was one long term that matched only a record containing that exact sentence. The keyword part (30 %) of the score was therefore almost always 0 in automatic searches. With OR, a record matches when it contains any term, and FTS5's `bm25()` ranks records with more and rarer terms higher. Terms shorter than 3 characters never match under trigram and are dropped.
+- **Why OR**: v1.4.0 joined the quoted terms with AND (FTS5's implicit operator). The hook uses the whole user message as the query, so a sentence such as `what is the quick fox doing in my DB` returned 0 rows even when a record contained `quick` and `fox`, and a Japanese sentence without spaces was one long term that matched only a record containing that exact sentence. The keyword part (30 %) of the score was therefore almost always 0 in automatic searches. With OR, a record matches when it contains any term, and FTS5's `bm25()` ranks records with more and rarer terms higher. Terms shorter than 3 characters never match under trigram and are dropped.
 - **Why CJK words are split into 3-character grams (2026-11-17)**: until then a Japanese sentence without punctuation was one term and matched only a record containing that exact sentence. On a real N3MC-Pro DB (2026-11-16, 200 recent prompts), only 33% of the prompts got any FTS hit; with the grams OR-ed, 97% did, and `bm25()` ranks records by how many and how rare the shared grams are. Hiragana-only grams (`してく`, `ください`) appear in most records and are dropped. This also turns a space-separated query (English) into OR of its words, as before.
 
 **CJK bigram index (`memories_fts_bi`, 2026-11-17)**: the trigram index cannot match a 2-character word (`記憶`, `設定`, `PR`). A second standalone FTS5 table (`tokenize='unicode61'`) stores `bigram_text(content)`: after `strip_fts_punctuation`, each CJK run becomes its overlapping 2-character grams and other runs stay whole (`N3MCの設定` → `N3MC の設 設定`).
@@ -641,9 +629,9 @@ $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 | `score` | `filter_score × time_decay × b_session` = `(cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_session` | The order of the results (and the `score=` shown) |
 | `filter_score` | `cos_sim × 0.7 + keyword_relevance × 0.3` (no `time_decay`, no `b_session`) | `min_score` and the relative cutoff (§5 "Search Result Filtering and Ordering", steps 2 and 4), and the order of the weak matches (step 7) |
 
-> **⚠️ Why (v1.5.0, found in the Free v1.4.0 review)**: in v1.4.0 both floors compared the final score, so `b_session` (0.6) and the relative cutoff (0.6) multiplied. As soon as the current session had one vector hit (cos ≥ 0.85, score ≥ 0.6), another session's record needed `cos × time_decay ≥` the top cos to survive: with the 90-day half-life, **every record from another session older than about 21 days was cut even when its content matched exactly** (reproduced: a current-session record at cos 0.86 stayed, a 30-day-old record from another session at cos 0.99 scored 0.33 and fell under the cutoff 0.602 × 0.6 = 0.361). A keyword-only hit from another session (at most 0.18) was always under `min_score` 0.2, and manual `--search` treats every record as another session, so it never showed keyword-only hits. The current session's records are already in Codex's context; cutting everything else defeated the purpose of cross-session memory.
+> **⚠️ Why**: in v1.4.0 both floors compared the final score, so `b_session` (0.6) and the relative cutoff (0.6) multiplied. As soon as the current session had one vector hit (cos ≥ 0.85, score ≥ 0.6), another session's record needed `cos × time_decay ≥` the top cos to survive: with the 90-day half-life, **every record from another session older than about 21 days was cut even when its content matched exactly** (reproduced: a current-session record at cos 0.86 stayed, a 30-day-old record from another session at cos 0.99 scored 0.33 and fell under the cutoff 0.602 × 0.6 = 0.361). A keyword-only hit from another session (at most 0.18) was always under `min_score` 0.2, and manual `--search` treats every record as another session, so it never showed keyword-only hits. The current session's records are already in Codex's context; cutting everything else defeated the purpose of cross-session memory.
 
-> **⚠️ Why `time_decay` left `filter_score` too (v1.6.0, found when scoring v1.5.0)**: v1.5.0 still multiplied `filter_score` by `time_decay` and compared it with `min_score` (0.2). With the 90-day half-life, a record stopped being returned at about 150 days (cos 0.86) to 180 days (cos 0.95) **even when it was the only record in the DB**; it stayed in the DB and in `--list`, but search could no longer reach it. In a measurement with the real model (50 records, 26 questions), making every record one year older dropped recall@3 from 23/26 to **0/26**. §1 promises a lifelong asset, so age may lower a record's rank but must not hide it. Without `time_decay` in `filter_score`, the one-year-old set returned 23/26 again, with the same number of results and no more noise.
+> **Reason**: Do not multiply `filter_score` by `time_decay`. Age affects ranking but does not remove a relevant saved record from search.
 
 - `b_local` (agent / installation grouping) is **not** applied in Free — every record is treated as `b_local = 1.0` regardless of match. The `B_local` multiplier that separates memories per agent / install is a **Pro feature**; in Pro it applies `b_local = 1.0` on match and `b_local = 0.8` on mismatch.
 
@@ -738,7 +726,7 @@ Users edit `config.json` by hand (e.g. to tune `vector_min_cos`), so assume it m
 
 - "Integer" means a JSON integer (`2000`). A float such as `2000.0` is **not** accepted, even when its value is whole: these keys are used as slice bounds and counts (`user_text[:search_query_max_chars]`), and v1.4.0 accepted `2000.0`, after which every `--hook-submit` failed with `TypeError` before searching and the user message never reached the DB (it was only in `audit.log`). A negative `server_port` or `half_life_days: 0` also passed v1.4.0's check.
 - Out-of-range values are treated exactly like wrongly typed ones: that key alone uses its default and the `config_type` notice names it.
-- **Why `search_result_limit` stops at 1365 (final review of 2026-11-18, C-06)**: the reference code's vector search asks sqlite-vec for `k = 3 × search_result_limit` neighbours, and sqlite-vec refuses a `k` above 4,096. With 1366 or more, every vector search returned nothing (sqlite-vec: "k value in knn query too large"; only a log warning) and the search went on with keyword hits only. 3 × 1365 = 4,095 is the largest value that works.
+- **Why `search_result_limit` stops at 1365**: the reference code's vector search asks sqlite-vec for `k = 3 × search_result_limit` neighbours, and sqlite-vec refuses a `k` above 4,096. With 1366 or more, every vector search returned nothing (sqlite-vec: "k value in knn query too large"; only a log warning) and the search went on with keyword hits only. 3 × 1365 = 4,095 is the largest value that works.
 
 **Writing `config.json` (v1.5.0)**:
 
@@ -759,15 +747,15 @@ At server startup (`lifespan`), run the full `PRAGMA integrity_check` exactly on
 3. Create a new empty DB.
 4. Output a warning message to stderr (including recovery instructions), and emit the notice `db_corrupt` ("The memory DB failed its integrity check and was set aside as <path>. A new empty DB is in use. To recover records: sqlite3 <path> .recover | sqlite3 recovered.db"). The notice appears at the top of search results like every notice (§3 "Notices").
 
-> **⚠️ Why (v1.5.0, found in the Free v1.4.0 review)**: v1.4.0 used the fixed name `.corrupt.bak`, so a second corruption overwrote the first backup (confirmed on Windows), and it deleted the WAL and SHM files, discarding records that a recovery could have used. The only signal was a stderr line that hooks never show.
+> **⚠️ Why**: v1.4.0 used the fixed name `.corrupt.bak`, so a second corruption overwrote the first backup, and it deleted the WAL and SHM files, discarding records that a recovery could have used. The only signal was a stderr line that hooks never show.
 
-**A damaged file that makes SQLite raise (final review of 2026-11-18, F13)**: when opening the DB (the `PRAGMA`s inside `get_connection`) or the check itself raises `sqlite3.DatabaseError` — not its subclass `OperationalError` (e.g. `database is locked`) — whose message contains `file is not a database` or `malformed` (`database disk image is malformed`), treat it like a result other than `ok`: steps 1–4 above (set aside, new empty DB, notice). One helper does this for both checks: `_connect_checked(pragma)` opens `DB_PATH`, runs `PRAGMA <pragma>` (`integrity_check` at startup, `quick_check` once per process in `_buffer_direct`, none after that) and returns an open connection; `_is_corruption_error(e)` is the test above. `get_connection` closes its connection before re-raising a failed `PRAGMA`, so the file can be moved on Windows. Any other `DatabaseError` is raised unchanged; the failure to load sqlite-vec keeps its own message with `Recovery: pip install sqlite-vec`. (Until then only a check that returned rows other than `ok` was handled: a file of garbage gave `file is not a database`, a damaged first page `database disk image is malformed`, nothing was set aside and no notice was given, every save of the hooks failed with "Physical save failed" on stderr only, and the server did not start.)
+**A damaged file that makes SQLite raise**: when opening the DB (the `PRAGMA`s inside `get_connection`) or the check itself raises `sqlite3.DatabaseError` — not its subclass `OperationalError` (e.g. `database is locked`) — whose message contains `file is not a database` or `malformed` (`database disk image is malformed`), treat it like a result other than `ok`: steps 1–4 above (set aside, new empty DB, notice). One helper does this for both checks: `_connect_checked(pragma)` opens `DB_PATH`, runs `PRAGMA <pragma>` (`integrity_check` at startup, `quick_check` once per process in `_buffer_direct`, none after that) and returns an open connection; `_is_corruption_error(e)` is the test above. `get_connection` closes its connection before re-raising a failed `PRAGMA`, so the file can be moved on Windows. Any other `DatabaseError` is raised unchanged; the failure to load sqlite-vec keeps its own message with `Recovery: pip install sqlite-vec`. (Until then only a check that returned rows other than `ok` was handled: a file of garbage gave `file is not a database`, a damaged first page `database disk image is malformed`, nothing was set aside and no notice was given, every save of the hooks failed with "Physical save failed" on stderr only, and the server did not start.)
 
 ### Migration Batch Processing
 
 Bulk migrations inside `/repair` (vector re-indexing, FTS punctuation cleaning) execute in **batches of 200**. To prevent OOM on large DBs, fetch using `LIMIT 200` instead of `fetchall()`. **Always keep `OFFSET` at `0`** — repaired records automatically drop out of the `WHERE mv.rowid IS NULL OR mf.rowid IS NULL` result set, so incrementing `OFFSET` across batches would skip the remaining unrepaired records (e.g., 400 unrepaired → 200 repaired → `OFFSET 200` returns 0 rows → remaining 200 permanently skipped). Exit immediately if a batch produces zero progress (e.g., embedding model unavailable) to prevent infinite loops.
 
-**No write lock while embedding (final review of 2026-11-18, F11)**: the vector repair computes the embeddings of the whole batch first, outside any transaction (an open one is committed before), and only then inserts the batch's `memories_vec` / `memories_fts` / `memories_fts_bi` rows and commits — the same order as `--reembed`. (Until then the first `INSERT … memories_vec` opened the write transaction, which stayed open while the rest of the batch — up to 200 records — was embedded; a `/buffer` that arrived meanwhile waited for the busy timeout and failed with `database is locked`, and so did its `_buffer_direct` fallback, so the prompt was not saved. Reproduced with 60 records and a stand-in model of 0.25 s per record.)
+**No write lock while embedding**: the vector repair computes the embeddings of the whole batch first, outside any transaction (an open one is committed before), and only then inserts the batch's `memories_vec` / `memories_fts` / `memories_fts_bi` rows and commits — the same order as `--reembed`. (Until then the first `INSERT … memories_vec` opened the write transaction, which stayed open while the rest of the batch — up to 200 records — was embedded; a `/buffer` that arrived meanwhile waited for the busy timeout and failed with `database is locked`, and so did its `_buffer_direct` fallback, so the prompt was not saved. Reproduced with 60 records and a stand-in model of 0.25 s per record.)
 
 **Per-call limit for hooks (v1.5.0)**: `/repair` accepts an optional body `{"max_records": int}`. `--hook-submit` sends `{"max_records": 200}` (one batch), so a large backlog — e.g. many records saved through `_buffer_direct` while another folder's server held the port — is worked off a batch per turn instead of blocking one prompt for minutes. `n3mc --repair` sends no limit and processes everything. The one-time migrations (FTS punctuation cleaning, vector re-index) follow the same limit; their markers are written only when the migration has finished.
 
@@ -802,7 +790,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   - An interrupted run (Ctrl+C, crash) keeps every finished batch; running `--reembed` again continues from the cursor. Rows saved while it runs are embedded by the restarted server with the configured model.
   - `--reembed` is not in the auto-approved permission rules (§4 ②): a human runs it.
 
-> **Why (v1.8.0, design review of 2026-11-17, proposal 3)**: up to v1.7.0 these facts were marker files next to the database (`vec_model.txt`, `fts_punct_cleaned`, `fts_bigram_v1`), but the backup procedure saves `n3memory.db` and `config.json` only. Restoring an older backup on the same PC kept the newer markers, so the bigram fill was skipped and older records lost their CJK keyword hits; moving a database built with another model to a new PC wrote the configured model into a new `vec_model.txt`, so the mismatch was never reported. The warning also said "delete `vec_model.txt`, then run `n3mc --repair`", but `--repair` only adds vectors that are missing: the old vectors stayed and the warning went silent.
+> **Why**: up to v1.7.0 these facts were marker files next to the database (`vec_model.txt`, `fts_punct_cleaned`, `fts_bigram_v1`), but the backup procedure saves `n3memory.db` and `config.json` only. Restoring an older backup on the same PC kept the newer markers, so the bigram fill was skipped and older records lost their CJK keyword hits; moving a database built with another model to a new PC wrote the configured model into a new `vec_model.txt`, so the mismatch was never reported. The warning also said "delete `vec_model.txt`, then run `n3mc --repair`", but `--repair` only adds vectors that are missing: the old vectors stayed and the warning went silent.
 
 ---
 
@@ -823,7 +811,7 @@ python -m n3memorycore.n3memory --search "keyword" --since 2026-01-01 --until 20
 - **Unreadable values**: if a bound cannot be parsed (`yesterday`, `2026-13-01`), print one line to stderr (`--since: cannot read 'yesterday' (use 2026-11-13 or 2026-11-13T09:00)`) and exit with status 2 without searching. If `since` is later than `until`, do the same with `--since is later than --until`.
 - Either bound may be specified alone (open-ended range).
 
-> **⚠️ Why (v1.5.0, found in the Free v1.4.0 review)**: v1.4.0 compared the raw argument string with the UTC timestamps in the DB. In Japan, `--since 2026-11-13` dropped records saved between 00:00 and 08:59 local time on the 13th (they are on the 12th in UTC) even though `saved=` showed them as the 13th; `yesterday` was compared as a string without any error; and `2026-01-01 10:00:00` (space) sorted wrongly against the `T`-separated stored values.
+> **⚠️ Why**: v1.4.0 compared the raw argument string with the UTC timestamps in the DB. In Japan, `--since 2026-11-13` dropped records saved between 00:00 and 08:59 local time on the 13th (they are on the 12th in UTC) even though `saved=` showed them as the 13th; `yesterday` was compared as a string without any error; and `2026-01-01 10:00:00` (space) sorted wrongly against the `T`-separated stored values.
 
 ### `--recall-thread` (Conversation Reconstruction)
 
@@ -853,7 +841,7 @@ Existing user DBs MUST continue to operate under the new specification without r
 
 ## 4. Codex Integration (Automation)
 
-`n3mc --init` merges UserPromptSubmit and Stop command hooks into `~/.codex/hooks.json` idempotently. It preserves other hooks and settings, makes a dated backup before changing an existing file, and leaves malformed JSON untouched. The user reviews and trusts the commands in Codex. **Do not rely on automatic capture until both hooks are trusted and enabled, and a new-chat multi-turn test succeeds.**
+`n3mc --init` merges UserPromptSubmit and Stop command hooks into `~/.codex/hooks.json` idempotently. It preserves other hooks and settings, makes a dated backup before changing an existing file, and leaves malformed JSON untouched. The user inspects and trusts the commands in Codex. **Do not rely on automatic capture until both hooks are trusted and enabled, and a new-chat multi-turn test succeeds.**
 
 ```json
 {
@@ -998,7 +986,7 @@ The audit log records operational state and errors. It must not retain raw input
 - **[Customization] Language localization**: Not applicable. Skip patterns (`_SKIP_PATTERNS`) have been REMOVED in favor of the complete-recording contract; there is nothing language-specific to localize in the hook filter layer.
 - **[Implementation Specs] Deduplication & HTTP-failure fallback**:
   - Saving is skipped **only for exactly identical text** (`check_exact_duplicate(conn, content, turn_id=...)`). With a `turn_id`, compare **only within the same `turn_id`**. Without a `turn_id` (manual `--buffer`), compare across all records. The same rule applies to both `/buffer` and `_buffer_direct`.
-  - **Checked again inside the write (second review of 2026-11-17, R04)**: the check above runs before the embedding, so a duplicate costs no model call. Two saves of the same text for the same turn can still arrive at once (a hook retried after a timeout, `/buffer` and `_buffer_direct` together) and both pass it. So every save path (`/buffer`, `_buffer_direct`) writes through `insert_memory_once(conn, id, content, timestamp, owner_id, turn_id=..., **the other insert_memory arguments)` in `core/database.py`: commit any open transaction, `BEGIN IMMEDIATE` (one writer at a time; it waits up to the connection's busy timeout of 10 seconds — `get_connection` opens with `sqlite3.connect(db_path, check_same_thread=False, timeout=BUSY_TIMEOUT_SECONDS)`, `BUSY_TIMEOUT_SECONDS = 10` in `core/database.py`; F11), run `check_exact_duplicate` again, then either roll back and return `None` — reported like the first check (`/buffer`: `{"status": "skipped", "count": 0, "reason": "exact_duplicate"}`) — or call `insert_memory` (which commits) and return its rowid. (Until then two such saves both wrote a row: reproduced with two threads.)
+  - **Checked again inside the write**: the check above runs before the embedding, so a duplicate costs no model call. Two saves of the same text for the same turn can still arrive at once (a hook retried after a timeout, `/buffer` and `_buffer_direct` together) and both pass it. So every save path (`/buffer`, `_buffer_direct`) writes through `insert_memory_once(conn, id, content, timestamp, owner_id, turn_id=..., **the other insert_memory arguments)` in `core/database.py`: commit any open transaction, `BEGIN IMMEDIATE` (one writer at a time; it waits up to the connection's busy timeout of 10 seconds — `get_connection` opens with `sqlite3.connect(db_path, check_same_thread=False, timeout=BUSY_TIMEOUT_SECONDS)`, `BUSY_TIMEOUT_SECONDS = 10` in `core/database.py`; F11), run `check_exact_duplicate` again, then either roll back and return `None` — reported like the first check (`/buffer`: `{"status": "skipped", "count": 0, "reason": "exact_duplicate"}`) — or call `insert_memory` (which commits) and return its rowid. (Until then two such saves both wrote a row: reproduced with two threads.)
   - **No similarity-based (cos_sim) deduplication is performed (removed in v1.4.0).** v1.3.x discarded a new record whenever an existing record had cos_sim ≥ 0.95. With multilingual-e5, chunks of a long, uniformly formatted reply, or the new and old versions of an almost identical settings text, score around 0.95, so "a new version of the same content" cannot be distinguished from "different content that looks alike". As a result, saving a settings text of about 2,000 characters with 12 items could lose one of its chunks, and recreating the settings could drop parts of the new version — breaking the Complete-Recording Contract. To prefer the newer version, handle it in search ordering instead of deleting (§5 "Search Result Filtering and Ordering").
   - **The reason for not comparing across all records** is that unchanged chunks of recreated settings are exactly identical to the old version, so comparing across all records would leave holes in the new version's exchange.
   - On HTTP POST failure to the embedding server, `_buffer_direct()` saves to SQLite and a later `--repair` fills in the vector. Report write failures to stderr. A Codex response is saved when the Stop hook receives it; the normal Codex path cannot recover an answer for which Stop did not run.
@@ -1114,7 +1102,7 @@ After implementation is complete, autonomously resolve the following tests and r
    - "First 80 characters of content" means `content[:80]` — the leading 80 characters of the **full content string**, NOT of the first line. Newlines (`\n`, `\r`) and tabs (`\t`) within those 80 characters MUST be replaced with a single space so the tab-separated layout keeps exactly four columns.
    - If `agent_name` is `NULL`, render it as `-`.
    - TSV ends with `Total: N records`. `--format jsonl` emits JSON records only.
-   - Statically confirm during code review that `write_buffer`, `batch_insert`, asynchronous writes, and deferred COMMITs are absent.
+   - Statically confirm during implementation checks that `write_buffer`, `batch_insert`, asynchronous writes, and deferred COMMITs are absent.
 
 3. **Real Person Test (Historical Data)**: After saving text about a real historical figure, run `--search` with that person's name and confirm that the relevant record appears **within the top 3 results** as the pass criterion. Additionally, verify that `--search` results are **printed to stdout** (visible in the terminal). If stdout is empty, this test fails.
    - Japanese example: "坂本龍馬" (Sakamoto Ryoma)
@@ -1134,7 +1122,7 @@ After implementation is complete, autonomously resolve the following tests and r
    - The `meta` row `fts_punct_cleaned` is written again
    - Running `n3mc --repair` again skips FTS cleaning (full-table scan is avoided due to the key)
 
-7. **Hook integration test**: Confirm `~/.codex/hooks.json` registers `n3memorycore.codex_entry --prompt` and `--stop`. Review, trust, and enable both commands in Codex `/hooks`. In a new chat outside the project, complete three exchanges. Verify each question and answer share the host `turn_id`, and the next prompt receives `# Recalled Memory Context`. Confirm an explicit do-not-save turn and a detected-credential turn are skipped on both sides. Do not claim automatic capture until trust and new-chat tests pass.
+7. **Hook integration test**: Confirm `~/.codex/hooks.json` registers `n3memorycore.codex_entry --prompt` and `--stop`. Inspect, trust, and enable both commands in Codex `/hooks`. In a new chat outside the project, complete three exchanges. Verify each question and answer share the host `turn_id`, and the next prompt receives `# Recalled Memory Context`. Confirm an explicit do-not-save turn and a detected-credential turn are skipped on both sides. Do not claim automatic capture until trust and new-chat tests pass.
 
 8. **stdout output test (no memory_context.md)**: Run `--search` and confirm that results are **printed to stdout** and that `~/.n3mc/.memory/memory_context.md` is **not created**.
 
@@ -1177,7 +1165,7 @@ n3mc-free/
     ├── test_hooks_encoding.py # Regression tests for surrogate stripping and UTF-8
     ├── test_regressions.py  # Layer 5: Regression tests for the v1.4.0 – v1.6.0 fixes (no model needed)
     ├── test_search_port_2026_11_17.py # Layer 5: Japanese FTS grams, bigram index, skipped system inputs, reply re-rank
-    ├── test_review_2026_11_17.py      # Layer 5: chunk length bound, Windows hook paths (no model needed)
+    ├── test_chunk_hook_paths.py      # Layer 5: chunk length bound, Windows hook paths (no model needed)
     └── test_index_meta.py             # Layer 5: meta table, model mismatch notice, --reembed (v1.8.0; no model needed)
 ```
 
@@ -1262,7 +1250,7 @@ Embeddings are replaced with deterministic fake vectors built from `zlib.crc32` 
 | `TestFtsQuoting` | Queries containing `\ / # = @ * $ %`, `AND/OR/NOT`, `"`, or control characters do not raise; terms containing symbols are hit; `hybrid_search` continues when `search_fts` raises. **v1.5.0**: terms are joined with `OR` (a sentence-like query hits a record that contains only some of its words); terms under 3 characters (`AI`, `東京`) are dropped and a query of only such terms skips FTS; punctuation in the query splits terms (`「アルファ9」の気温は？` hits `架空の惑星「アルファ9」の気温設定`). **2026-11-17**: at most 40 terms; CJK words of 4+ characters become 3-character grams |
 | `test_search_port_2026_11_17.py` (2026-11-17) | A Japanese sentence without spaces hits a record containing its words; hiragana-only grams are dropped; symbol-only and 2-character queries do not raise; `bigram_text('N3MCの設定')` is `N3MC の設 設定`; `記憶` and `PR` hit through the bigram index (and through `hybrid_search`); a failing bigram search keeps the trigram results; `delete_memory` leaves no bigram row; `--repair` fills the bigram rows of an old DB once (two runs, one row per record); `<agent-message from=...>` and `<system-reminder>` prompts are neither saved nor searched and keep `turn_id`, while a user question starting with `<agent-message` or `<div>` is not skipped; the reply re-rank is off by default, moves the exchange with the closer reply up when on, and returns its input on a DB error |
 | `test_index_meta.py` (v1.8.0) | `init_db` creates `meta`; `/repair` writes `fts_punct_cleaned` / `fts_bigram` / `embed_model` / `embed_dim`; a restored older database (no `meta` keys) next to v1.7.0 marker files gets its bigram index filled; `embed_model` comes from `vec_model.txt` only when vectors exist; a mismatch emits `embed_model_mismatch` and a match clears it; `--reembed` replaces every vector with the configured model's, writes `embed_model`, clears the notice, resumes from `reembed_cursor`, and refuses a model of another dimension without changing anything |
-| `test_review_2026_11_17.py` (2026-11-17) | No chunk is longer than `max_chars` (paragraph and sentence paths, `max_chars` 400 and small values, Japanese text); `chunk_text('x' * 10 + '\n\n' + 'y' * 400)` keeps all 410 letters and returns chunks of at most 400; `is_own_hook` recognizes `C:\Tools\n3mc-hook.exe` and `C:\Tools\n3mc-stop-hook.exe` written with backslashes and no quotes, and `--init` then replaces such an entry instead of adding a second one |
+| `test_chunk_hook_paths.py` | No chunk is longer than `max_chars` (paragraph and sentence paths, `max_chars` 400 and small values, Japanese text); `chunk_text('x' * 10 + '\n\n' + 'y' * 400)` keeps all 410 letters and returns chunks of at most 400; `is_own_hook` recognizes `C:\Tools\n3mc-hook.exe` and `C:\Tools\n3mc-stop-hook.exe` written with backslashes and no quotes, and `--init` then replaces such an entry instead of adding a second one |
 | `TestVectorFilter` | A search with `since` returns in-range records even if they are outside the global KNN top; falls back to exact computation when `rowid IN` is unavailable |
 | `TestNoSimilarityDedup` | Similar chunks (cos ≥ 0.95) are all saved; exact matches within the same `turn_id` are skipped; exact matches in a different `turn_id` are saved; without `turn_id`, exact matches are skipped globally |
 | `TestSearchShaping` | Candidates below `vector_min_cos` are discarded; relative cutoff; `_version_group` rows survive the cutoff; the newer version comes first; identical content is collapsed; `pair_top_n`, `pair_max_chars`, and `pairs_omitted`. **v1.5.0**: a 30-day-old record from another session with high similarity survives the relative cutoff while a current-session record with lower similarity is present; a keyword-only hit from another session survives `min_score`; the order is still by the final score (current session first). **v1.6.0**: a 400-day-old record with high similarity is returned even when it is the only candidate (`min_score` and the relative cutoff ignore `time_decay`); when a new and a 400-day-old record with the same similarity are both present, both are returned and the new one comes first |
@@ -1330,7 +1318,6 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 |---|---|---|
 | 1. Implementation | Paste the prompt to request implementation | **GPT-6 Sol** (fast) |
 | 2. Debugging | Paste 3 prompts **one at a time** for verification | **GPT-6 Sol** |
-| 3. Quality review | **Start a new session**, then paste the prompt for evaluation & improvement | **GPT-6 Astra** (deep reasoning) |
 
 ---
 
@@ -1373,38 +1360,7 @@ Please run the commands yourself to verify whether the results of saving with --
 Please make any necessary corrections.
 ```
 
-Once all 3 are done, proceed to Phase 3.
-
----
-
-### Phase 3: Quality Review (GPT-6 Astra)
-
-> **⚠️ Review in a new session**: Do not review in the session that implemented and debugged the code. Exit Codex, start it again in the same install folder, and begin a new session.
-> - The implementing session's context holds its own decisions and explanations, so a review there tends to confirm them instead of checking the code against this specification afresh.
-> - A restarted Codex also loads the hooks registered during setup, so the review sees the memory working as a user will.
-> - In the new session the hooks may recall parts of the implementation conversation; that is expected. Base the review on the code, this specification and the results of commands actually run.
-
-In the new session, set the model to **GPT-6 Astra** and paste the following:
-
-```
-Please review N3MemoryCore.
-Please make any necessary corrections.
-
-How many points out of 10 does N3MemoryCore score as a memory system and RAG?
-Please generate a scorecard with separate scores for the memory system and RAG.
-```
-
-GPT-6 Astra will actually execute commands and generate a scorecard with two axes: **Memory System** (save, persistence, deduplication) and **RAG** (search accuracy, ranking, noise resilience).
-
-> **Note**: The memory system side should score well, but the RAG side is a basic implementation. **The RAG score is unlikely to exceed 7** because the following are not yet implemented:
-> - Language-specific tokenization (e.g., MeCab / SudachiPy for Japanese)
-> - Language-optimized embedding model (e.g., multilingual-e5-large)
-> - Advanced chunking strategy (language- and structure-aware splitting)
-> - Reranking (Cross-Encoder, Cohere Rerank, LLM, etc. for re-ordering search results)
->
-> Lenient scoring hides improvement opportunities — evaluate strictly. **Regardless of the score, have GPT-6 Astra specifically identify what is missing and always consult on improvements.**
-
----
+When all three checks pass, verify hook trust, saving, and recall in a new chat.
 
 Copyright (C) 2026 NeuralNexusNote™ / ArnolfJp019
 All names and logos associated with N3MemoryCore and NeuralNexusNote are trademarks of the author.

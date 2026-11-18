@@ -237,3 +237,13 @@ test_artifacts/review_20261118/update_init_tests.py
 test_artifacts/review_20261118/update_spec_notes.py
 test_artifacts/review_20261118/hooks-*/
 test_artifacts/review_20261118/retrieval-*/
+
+# Local-only CPU upgrade scorecard (do not publish)
+/docs/CPU_UPGRADE_20261118_JP.md
+
+# Local development records; excluded from distributed repository contents
+/docs/CLI_SPEC_AUDIT_20261118_JP.md
+/docs/CROSS_SESSION_TEST_20261118_JP.md
+/docs/REVIEW_SCORECARD_20261118_JP.md
+/test_artifacts/cpu_upgrade_20261118/
+/test_artifacts/review_20261118/

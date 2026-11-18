@@ -225,7 +225,38 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memories_turn_id ON memories(turn_id)"
         )
+    ensure_memory_metadata(conn)
     conn.commit()
+
+
+def ensure_memory_metadata(conn: sqlite3.Connection) -> None:
+    """Additive migration; preserve IDs, rowids, content and existing indexes."""
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(memories)')}
+    for name in ('role', 'source'):
+        if name not in cols:
+            conn.execute(f'ALTER TABLE memories ADD COLUMN {name} TEXT')
+    conn.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    if not conn.execute("SELECT 1 FROM meta WHERE key = 'provenance_schema' AND value = '1'").fetchone():
+        conn.execute("""UPDATE memories SET role = CASE
+            WHEN content LIKE '[user] %' OR content LIKE '[user %' THEN 'user'
+            WHEN content LIKE '[claude] %' OR content LIKE '[claude %' THEN 'assistant'
+            ELSE 'unknown' END WHERE role IS NULL""")
+        if 'agent_name' in cols:
+            conn.execute("""UPDATE memories SET source = CASE
+                WHEN agent_name = 'codex' THEN 'codex'
+                WHEN agent_name = 'claude-code' THEN 'claude-code'
+                ELSE 'unspecified' END WHERE source IS NULL""")
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('provenance_schema', '1')")
+    conn.execute("""CREATE TABLE IF NOT EXISTS turn_lifecycle (
+        turn_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL CHECK(state IN ('superseded', 'forgotten')),
+        replacement_turn_id TEXT,
+        changed_at TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE VIEW IF NOT EXISTS current_memories AS
+        SELECT m.rowid AS rowid, m.* FROM memories m
+        WHERE NOT EXISTS (SELECT 1 FROM turn_lifecycle t WHERE t.turn_id = m.turn_id)
+    """)
 
 
 def meta_get(conn: sqlite3.Connection, key: str) -> Optional[str]:
@@ -241,6 +272,12 @@ def meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
 def meta_delete(conn: sqlite3.Connection, key: str) -> None:
     """Caller commits."""
     conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+
+
+def embedding_index_compatible(conn: sqlite3.Connection, model: str) -> bool:
+    """Different models and an interrupted reembed cannot share a vector space."""
+    recorded = meta_get(conn, 'embed_model')
+    return not meta_get(conn, 'reembed_model') and (recorded is None or recorded == model)
 
 
 def vec_table_dim(conn: sqlite3.Connection) -> Optional[int]:
@@ -269,6 +306,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
             except Exception:
                 pass
 
+    ensure_memory_metadata(conn)
+    conn.commit()
     cursor = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_memories_turn_id'"
     )
@@ -316,11 +355,19 @@ def insert_memory(
     session_id: Optional[str] = None,
     turn_id: Optional[str] = None,
 ) -> int:
+    if turn_id and conn.execute(
+        "SELECT 1 FROM turn_lifecycle WHERE turn_id = ? AND state = 'forgotten'", (turn_id,)
+    ).fetchone():
+        raise ValueError('This turn was explicitly forgotten; capture is blocked')
+    role = ('user' if re.match(r'^\[user(?:\]| \d+/\d+\])', content)
+            else 'assistant' if re.match(r'^\[claude(?:\]| \d+/\d+\])', content)
+            else 'unknown')
+    source = agent_name if agent_name in ('codex', 'claude-code') else 'unspecified'
     conn.execute(
         """INSERT INTO memories
-           (id, content, timestamp, owner_id, local_id, agent_name, session_id, turn_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (id, content, timestamp, owner_id, local_id, agent_name, session_id, turn_id),
+           (id, content, timestamp, owner_id, local_id, agent_name, session_id, turn_id, role, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (id, content, timestamp, owner_id, local_id, agent_name, session_id, turn_id, role, source),
     )
     rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     # spec §3: FTS stores punctuation-stripped text; memories stores original
@@ -342,7 +389,8 @@ def insert_memory(
 
 
 def insert_memory_once(conn: sqlite3.Connection, id: str, content: str, timestamp: str,
-                       owner_id: str, turn_id: Optional[str] = None, **kw) -> Optional[int]:
+                       owner_id: str, turn_id: Optional[str] = None,
+                       expected_embed_model: Optional[str] = None, **kw) -> Optional[int]:
     """spec §5.4 (R04): the exact-duplicate check again, inside the write.
 
     BEGIN IMMEDIATE lets one writer in at a time, so two saves of the same text
@@ -355,6 +403,11 @@ def insert_memory_once(conn: sqlite3.Connection, id: str, content: str, timestam
         if check_exact_duplicate(conn, content, turn_id=turn_id):
             conn.rollback()
             return None
+        # Reembedding may have started while the caller computed its vector.
+        # Recheck under the write lock; preserve the text for a later repair.
+        if (expected_embed_model and kw.get('embedding') is not None
+                and not embedding_index_compatible(conn, expected_embed_model)):
+            kw['embedding'] = None
         return insert_memory(conn, id, content, timestamp, owner_id, turn_id=turn_id, **kw)
     except BaseException:
         if conn.in_transaction:
@@ -371,9 +424,10 @@ def search_vector(
             """SELECT m.id, m.content, m.timestamp, m.owner_id, m.local_id,
                       m.agent_name, m.session_id, m.turn_id, mv.distance, m.rowid
                FROM memories_vec mv
-               JOIN memories m ON mv.rowid = m.rowid
+               JOIN current_memories m ON mv.rowid = m.rowid
                WHERE mv.embedding MATCH ?
                  AND k = ?
+                 AND mv.rowid IN (SELECT rowid FROM current_memories)
                ORDER BY mv.distance""",
             (vec_bytes, k),
         )
@@ -384,7 +438,7 @@ def search_vector(
 
 
 _MEMORY_COLS = ("m.id, m.content, m.timestamp, m.owner_id, m.local_id, "
-                "m.agent_name, m.session_id, m.turn_id")
+                "m.agent_name, m.session_id, m.turn_id, m.role, m.source")
 
 
 def _time_filter(since: Optional[str], until: Optional[str]):
@@ -432,7 +486,7 @@ def _search_vector_exact(
     OperationalError (older sqlite-vec): compute vec_distance_l2 for every
     filtered row and sort by distance."""
     where, tparams = _time_filter(since, until)
-    sub = f"SELECT rowid FROM memories WHERE {where}" if where else "SELECT rowid FROM memories"
+    sub = f"SELECT rowid FROM current_memories WHERE {where}" if where else "SELECT rowid FROM current_memories"
     dist_rows = conn.execute(
         f"""SELECT mv.rowid, vec_distance_l2(mv.embedding, ?) AS distance
             FROM memories_vec mv
@@ -465,7 +519,7 @@ def search_vector_with_filter(
         dist_rows = conn.execute(
             f"""SELECT rowid, distance FROM memories_vec
                 WHERE embedding MATCH ? AND k = ?
-                  AND rowid IN (SELECT rowid FROM memories WHERE {where})""",
+                  AND rowid IN (SELECT rowid FROM current_memories WHERE {where})""",
             [vec_bytes, k] + tparams,
         ).fetchall()
         return _rows_with_distance(conn, [(r[0], r[1]) for r in dist_rows])
@@ -516,7 +570,7 @@ def search_fts(
                       m.agent_name, m.session_id, m.turn_id,
                       bm25(memories_fts) AS bm25_score, m.rowid
                FROM memories_fts
-               JOIN memories m ON memories_fts.rowid = m.rowid
+               JOIN current_memories m ON memories_fts.rowid = m.rowid
                WHERE memories_fts MATCH ?{time_sql}
                ORDER BY bm25_score
                LIMIT ?""",
@@ -556,7 +610,7 @@ def search_fts_bigram(
                   m.agent_name, m.session_id, m.turn_id,
                   bm25(memories_fts_bi) AS bm25_score, m.rowid
            FROM memories_fts_bi
-           JOIN memories m ON memories_fts_bi.rowid = m.rowid
+           JOIN current_memories m ON memories_fts_bi.rowid = m.rowid
            WHERE memories_fts_bi MATCH ?{time_sql}
            ORDER BY bm25_score
            LIMIT ?""",
@@ -602,7 +656,7 @@ def get_all_memories(
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     cursor = conn.execute(
         f"""SELECT id, content, timestamp, owner_id, local_id, agent_name,
-                  session_id, turn_id, rowid
+                  session_id, turn_id, rowid, role, source
            FROM memories {where}
            ORDER BY rowid""",
         params,
@@ -644,6 +698,10 @@ def check_exact_duplicate(
     unchanged chunks equal the old version's must still be saved).
     Without turn_id (manual --buffer): compare globally.
     """
+    if turn_id and conn.execute(
+        "SELECT 1 FROM turn_lifecycle WHERE turn_id = ? AND state = 'forgotten'", (turn_id,)
+    ).fetchone():
+        return True  # Includes retries with a newly generated record ID.
     if turn_id:
         row = conn.execute(
             "SELECT 1 FROM memories WHERE content = ? AND turn_id = ? LIMIT 1",
