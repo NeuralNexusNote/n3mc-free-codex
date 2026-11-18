@@ -1,0 +1,49 @@
+"""Path resolution for N3MemoryCore.
+
+All persistent data lives under a single home directory, resolved at
+import time from (in priority order):
+
+1. $N3MC_HOME environment variable
+2. ~/.n3mc/  (default)
+
+Per-project Claude Code config (.claude/CLAUDE.md, .claude/rules/) is
+resolved against the current working directory at use time.
+"""
+import os
+
+
+def get_home_dir() -> str:
+    env = os.environ.get('N3MC_HOME')
+    if env:
+        return os.path.expanduser(env)
+    return os.path.join(os.path.expanduser('~'), '.n3mc')
+
+
+HOME_DIR     = get_home_dir()
+MEMORY_DIR   = os.path.join(HOME_DIR,   '.memory')
+DB_PATH      = os.path.join(MEMORY_DIR, 'n3memory.db')
+PID_FILE     = os.path.join(MEMORY_DIR, 'n3mc.pid')
+TURN_ID_FILE = os.path.join(MEMORY_DIR, 'turn_id.txt')
+# v1.4.0: memory_context.md is no longer written. The constant is kept only so
+# that --stop can delete a leftover file from v1.3.x (spec §4).
+CONTEXT_FILE = os.path.join(MEMORY_DIR, 'memory_context.md')
+CONTEXT_RETIRED_MARKER = os.path.join(MEMORY_DIR, '.memory_context_retired')
+NOTICES_FILE = os.path.join(MEMORY_DIR, 'notices.json')
+AUDIT_LOG    = os.path.join(MEMORY_DIR, 'audit.log')
+# v1.5.0: stderr of the background server, and the marker written when the
+# server exits during startup (spec §3 "Starting the server").
+SERVER_LOG   = os.path.join(MEMORY_DIR, 'server.log')
+SERVER_START_FAILED_MARKER = os.path.join(MEMORY_DIR, 'server_start_failed')
+CONFIG_FILE  = os.path.join(HOME_DIR,   'config.json')
+
+
+def claude_paths(cwd: str = None) -> dict:
+    """Resolve per-project Claude Code config paths against cwd."""
+    cwd = cwd or os.getcwd()
+    claude_dir = os.path.join(cwd, '.claude')
+    return {
+        'CLAUDE_DIR':  claude_dir,
+        'CLAUDE_MD':   os.path.join(claude_dir, 'CLAUDE.md'),
+        'RULES_DIR':   os.path.join(claude_dir, 'rules'),
+        'BEHAVIOR_MD': os.path.join(claude_dir, 'rules', 'n3mc-behavior.md'),
+    }

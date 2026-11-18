@@ -1,0 +1,62 @@
+{
+  "__init__.py": {
+    "mtime": 1794961761.8053262,
+    "seen": 1794965115.4300225,
+    "ast_hash": "89618814f0a0ee538114a532d685e34e",
+    "semantic_hash": "89618814f0a0ee538114a532d685e34e"
+  },
+  "codex_entry.py": {
+    "mtime": 1794964800.3303585,
+    "seen": 1794965115.4300225,
+    "ast_hash": "1c27ac26dd747b4dfa38727a356d718c",
+    "semantic_hash": "1c27ac26dd747b4dfa38727a356d718c"
+  },
+  "codex_install.py": {
+    "mtime": 1794963858.033294,
+    "seen": 1794965115.4300225,
+    "ast_hash": "7d1257b46ad367908da7ece74d6aed6d",
+    "semantic_hash": "7d1257b46ad367908da7ece74d6aed6d"
+  },
+  "core/__init__.py": {
+    "mtime": 1777294257.1728354,
+    "seen": 1794965115.4300225,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "core/database.py": {
+    "mtime": 1794959627.6943445,
+    "seen": 1794965115.4300225,
+    "ast_hash": "5ea485adc3b92a8705faaf9c4c665b03",
+    "semantic_hash": "5ea485adc3b92a8705faaf9c4c665b03"
+  },
+  "core/processor.py": {
+    "mtime": 1794902781.3775153,
+    "seen": 1794965115.4300225,
+    "ast_hash": "5919de35a4e25dedd0b1d33dd4993bfe",
+    "semantic_hash": "5919de35a4e25dedd0b1d33dd4993bfe"
+  },
+  "n3mc_hook.py": {
+    "mtime": 1794571891.9953258,
+    "seen": 1794965115.4300225,
+    "ast_hash": "316f9364201cec8bef388f71f5b88e9a",
+    "semantic_hash": "316f9364201cec8bef388f71f5b88e9a"
+  },
+  "n3mc_stop_hook.py": {
+    "mtime": 1794571891.9963248,
+    "seen": 1794965115.4300225,
+    "ast_hash": "0d8ff9584c33afd3b4486a4f9cdcb1e0",
+    "semantic_hash": "0d8ff9584c33afd3b4486a4f9cdcb1e0"
+  },
+  "n3memory.py": {
+    "mtime": 1794964467.5759566,
+    "seen": 1794965115.4300225,
+    "ast_hash": "1b7821c729b2d696f6d5f0a507adeb59",
+    "semantic_hash": "1b7821c729b2d696f6d5f0a507adeb59"
+  },
+  "paths.py": {
+    "mtime": 1794571891.9983244,
+    "seen": 1794965115.4300225,
+    "ast_hash": "2663db1ddbcc3b7be64ad4ec4010340c",
+    "semantic_hash": "2663db1ddbcc3b7be64ad4ec4010340c"
+  }
+}

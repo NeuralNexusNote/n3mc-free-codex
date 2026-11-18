@@ -1,0 +1,59 @@
+import sys
+
+# spec §3: reconfigure streams to UTF-8 at module top — before any stdin read
+for _s_name in ("stdin", "stdout", "stderr"):
+    _s = getattr(sys, _s_name, None)
+    if _s is not None and hasattr(_s, 'reconfigure'):
+        try:
+            _s.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+
+import json
+import os
+import subprocess
+from datetime import datetime, timezone
+
+from .paths import MEMORY_DIR, AUDIT_LOG
+
+
+def _write_audit(hook: str, raw: str, payload: dict) -> None:
+    # spec §5.4: audit.log write failures go to stderr and never stop a hook
+    try:
+        from .core.processor import sanitize_surrogates
+        os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
+        record = json.dumps({
+            'ts':      datetime.now(timezone.utc).isoformat(),
+            'hook':    hook,
+            'raw':     sanitize_surrogates(raw[:4096]),
+            'payload': sanitize_surrogates(payload),
+        }, ensure_ascii=False)
+        with open(AUDIT_LOG, 'a', encoding='utf-8') as f:
+            f.write(record + '\n')
+    except Exception as e:
+        print(f"Warning: audit log write failed: {e}", file=sys.stderr)
+
+
+def main():
+    raw = sys.stdin.read()
+
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = {'raw': raw}
+
+    # spec §5: Step 0 — audit log written before any other processing
+    _write_audit('UserPromptSubmit', raw, payload)
+
+    # spec §5: synchronous subprocess — must complete before Claude gets control
+    proc = subprocess.run(
+        [sys.executable, '-m', 'n3memorycore.n3memory', '--hook-submit'],
+        input=raw,
+        encoding='utf-8',
+        capture_output=False,
+    )
+    sys.exit(proc.returncode)
+
+
+if __name__ == '__main__':
+    main()
