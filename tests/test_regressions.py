@@ -1799,8 +1799,8 @@ class TestWeakMatches:  # v1.6.0 (A2)
         js = json.loads(json.dumps(out))
         assert [r['weak'] for r in js['results']] == [False, True, True]
 
-    def test_default_config_has_min_results_3(self):
-        assert n3memory._DEFAULT_CONFIG['min_results'] == 3
+    def test_default_config_does_not_force_weak_results(self):
+        assert n3memory._DEFAULT_CONFIG['min_results'] == 0
 
 
 class TestRender(TestRender):  # v1.6.0 additions
@@ -1870,7 +1870,7 @@ class TestConfig(TestConfig):  # v1.6.0 additions
     def test_min_results_out_of_range_ignored(self, value):
         write_cfg('{' + IDS + f', "min_results": {value}' + '}')
         c = n3memory._load_config()
-        assert c['min_results'] == 3
+        assert c['min_results'] == 0
         assert 'min_results' in notices()['config_type']['message']
 
     def test_min_results_zero_accepted(self):

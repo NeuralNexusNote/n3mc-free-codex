@@ -34,6 +34,7 @@ from .core.database import (
     get_connection, init_db, migrate_schema, insert_memory, insert_memory_once,
     check_exact_duplicate, search_vector, find_unindexed_memories,
     strip_fts_punctuation, serialize_vector,
+    embedding_index_compatible,
 )
 from .core.processor import (
     embed_passage, cosine_sim_from_l2, hybrid_search,
@@ -48,6 +49,7 @@ _CODE_FILES = (
     os.path.join(_PKG_DIR, 'n3memory.py'),
     os.path.join(_PKG_DIR, 'core', 'database.py'),
     os.path.join(_PKG_DIR, 'core', 'processor.py'),
+    os.path.join(_PKG_DIR, 'maintenance.py'),
 )
 
 # Set by ensure_server() when the port answers with another folder's server
@@ -207,7 +209,11 @@ _DEFAULT_CONFIG: dict = {
     "search_query_max_chars":   2000,
     "vector_min_cos":           0.85,   # measured with multilingual-e5-base
     "relative_min_score_ratio": 0.6,
-    "min_results":              3,      # weak-match fill, spec §5 step 7 (v1.6.0)
+    "min_results":              0,      # no forced weak matches by default
+    "semantic_rescue_enabled":  True,
+    "semantic_rescue_min_cos":  0.80,
+    "semantic_rescue_margin":   0.02,
+    "context_max_chars":        12000,
     "pair_top_n":               3,
     "pair_max_chars":           3000,
     "version_order_enabled":    True,
@@ -231,6 +237,9 @@ _CONFIG_RULES: dict = {
     'search_query_max_chars':   ('int', 1, None, False),
     'version_min_chars':        ('int', 1, None, False),
     'min_results':              ('int', 0, None, False),
+    'semantic_rescue_min_cos':  ('num', 0, 1, False),
+    'semantic_rescue_margin':   ('num', 0, 1, False),
+    'context_max_chars':        ('int', 1000, 100000, False),
     'half_life_days':           ('num', 0, None, True),
     'bm25_min_threshold':       ('num', 0, None, False),
     'min_score':                ('num', 0, 1, False),
@@ -1183,15 +1192,19 @@ def cmd_reembed(cfg: dict) -> int:
         total = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         done = conn.execute("SELECT COUNT(*) FROM memories WHERE rowid <= ?", (cursor,)).fetchone()[0]
         while True:
-            rows = conn.execute("SELECT rowid, content FROM memories WHERE rowid > ? "
+            rows = conn.execute("SELECT rowid, content, id FROM memories WHERE rowid > ? "
                                 "ORDER BY rowid LIMIT 200", (cursor,)).fetchall()
             if not rows:
                 break
             vecs = model.encode(["passage: " + r[1] for r in rows], normalize_embeddings=True)
             ids = [r[0] for r in rows]
-            conn.executemany("DELETE FROM memories_vec WHERE rowid = ?", [(i,) for i in ids])
+            conn.execute('BEGIN IMMEDIATE')
+            live = [(row[0], vec) for row, vec in zip(rows, vecs)
+                    if conn.execute('SELECT 1 FROM memories WHERE rowid = ? AND id = ?',
+                                    (row[0], row[2])).fetchone()]
+            conn.executemany("DELETE FROM memories_vec WHERE rowid = ?", [(i,) for i, _ in live])
             conn.executemany("INSERT INTO memories_vec(rowid, embedding) VALUES (?, ?)",
-                             [(i, serialize_vector(list(v))) for i, v in zip(ids, vecs)])
+                             [(i, serialize_vector(list(v))) for i, v in live])
             cursor = ids[-1]
             meta_set(conn, 'reembed_cursor', str(cursor))
             conn.commit()
@@ -1310,7 +1323,7 @@ def _repair_db(max_records: Optional[int] = None) -> int:
                 conn.commit()
             vecs = {}
             for row in rows:
-                if row['vec_rowid'] is None:
+                if row['vec_rowid'] is None and embedding_index_compatible(conn, current_model):
                     try:
                         vecs[row['rowid']] = embed_passage(row['content'])
                     except Exception as e:
@@ -1318,10 +1331,17 @@ def _repair_db(max_records: Optional[int] = None) -> int:
             for row in rows:
                 rowid    = row['rowid']
                 content  = row['content']
+                # A concurrent forget can remove/reuse rowids while embedding.
+                # Hold the write lock, then verify identity before index writes.
+                if not conn.in_transaction:
+                    conn.execute('BEGIN IMMEDIATE')
+                live = conn.execute('SELECT id FROM memories WHERE rowid = ?', (rowid,)).fetchone()
+                if not live or live['id'] != row['id']:
+                    continue
                 has_fts  = row['fts_rowid'] is not None
                 changed  = False
 
-                if rowid in vecs:
+                if rowid in vecs and embedding_index_compatible(conn, current_model):
                     conn.execute(
                         "INSERT OR IGNORE INTO memories_vec(rowid, embedding) VALUES (?, ?)",
                         (rowid, serialize_vector(vecs[rowid]))
@@ -1471,6 +1491,8 @@ try:
 
             vec = None
             try:
+                if not embedding_index_compatible(conn, _srv_cfg.get('embed_model') or _DEFAULT_CONFIG['embed_model']):
+                    raise RuntimeError('index model differs or reembedding is incomplete; run --reembed')
                 vec = embed_passage(content)
             except Exception as e:
                 logger.warning(f"Embed error: {e}")
@@ -1481,6 +1503,7 @@ try:
                 conn, str(uuid7()), content, ts,
                 owner_id=_srv_cfg['owner_id'],
                 embedding=vec,
+                expected_embed_model=_srv_cfg.get('embed_model') or _DEFAULT_CONFIG['embed_model'],
                 local_id=local,
                 agent_name=agent,
                 session_id=sess,
@@ -1774,12 +1797,12 @@ def cmd_list(
         rows = get_all_memories(conn, since=since, until=until)
         if fmt == 'jsonl':
             for r in rows:
-                print(json.dumps({
-                    'id':         r['id'],
-                    'timestamp':  r['timestamp'],
-                    'agent_name': r['agent_name'],
-                    'content':    r['content'],
-                }, ensure_ascii=False))
+                record = {key: r[key] for key in r.keys() if key != 'rowid'}
+                state = conn.execute('SELECT state, replacement_turn_id FROM turn_lifecycle WHERE turn_id = ?',
+                                     (r['turn_id'],)).fetchone()
+                record['state'] = state['state'] if state else 'active'
+                record['replacement_turn_id'] = state['replacement_turn_id'] if state else None
+                print(json.dumps(record, ensure_ascii=False))
         else:
             for r in rows:
                 # spec §6 test 2: [UUIDv7]\t[timestamp]\t[agent_name]\t[content[:80]]
@@ -2503,6 +2526,14 @@ def main() -> None:
     grp.add_argument('--hook-submit',      action='store_true', dest='hook_submit')
     grp.add_argument('--save-claude-turn', action='store_true', dest='save_claude_turn')
     grp.add_argument('--run-server',       action='store_true', dest='run_server')
+    grp.add_argument('--backup', metavar='NEW_DIRECTORY', help='Create a verified SQLite snapshot')
+    grp.add_argument('--restore-backup', metavar='DIRECTORY', help='Restore a snapshot to a new home')
+    grp.add_argument('--export-records', metavar='NEW_FILE', help='Export text and all provenance as JSONL')
+    grp.add_argument('--forget-turn', metavar='TURN_ID', help='Preview deletion of a complete turn')
+    grp.add_argument('--supersede-turn', metavar='TURN_ID', help='Mark an old turn as replaced')
+    parser.add_argument('--replacement-turn', metavar='TURN_ID')
+    parser.add_argument('--to-home', metavar='NEW_DIRECTORY')
+    parser.add_argument('--yes', action='store_true', help='Apply a previewed lifecycle change')
 
     parser.add_argument('--agent-id', dest='agent_id', default=None)
     parser.add_argument('--since', default=None,
@@ -2515,6 +2546,33 @@ def main() -> None:
                         choices=['tsv', 'jsonl'], help='Output format for --list/--recall-thread')
 
     args = parser.parse_args()
+
+    if args.replacement_turn and not args.supersede_turn:
+        parser.error('--replacement-turn requires --supersede-turn')
+    if args.supersede_turn and not args.replacement_turn:
+        parser.error('--supersede-turn requires --replacement-turn')
+    if bool(args.restore_backup) != bool(args.to_home):
+        parser.error('--restore-backup and --to-home must be used together')
+    if args.yes and not (args.forget_turn or args.supersede_turn):
+        parser.error('--yes requires --forget-turn or --supersede-turn')
+
+    if any((args.backup, args.restore_backup, args.export_records, args.forget_turn, args.supersede_turn)):
+        from .maintenance import backup_database, restore_database, export_records, change_turn
+        try:
+            if args.backup:
+                result = backup_database(DB_PATH, CONFIG_FILE, args.backup)
+            elif args.restore_backup:
+                result = restore_database(args.restore_backup, args.to_home)
+            elif args.export_records:
+                result = export_records(DB_PATH, args.export_records)
+            else:
+                result = change_turn(DB_PATH, args.forget_turn or args.supersede_turn,
+                                     replacement=args.replacement_turn, apply=args.yes)
+            print(json.dumps(result, ensure_ascii=False))
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            print(f'N3MC: {exc}', file=sys.stderr)
+            raise SystemExit(1)
+        return
 
     if args.init:
         sys.exit(cmd_init())

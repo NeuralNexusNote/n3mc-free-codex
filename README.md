@@ -1,13 +1,9 @@
-## Codex setup
-
-From this directory, use a Python environment with the dependencies in `pyproject.toml`, then run `python -m n3memorycore.n3memory --init`. The installer registers UserPromptSubmit and Stop in `~/.codex/hooks.json`. Review and trust both commands in Codex, then verify a new chat over multiple turns before relying on automatic capture. The hooks use Codex `thread_id` and `turn_id`; no MCP connection is required.
-
-# N3MemoryCore (N3MC)
+# N3MemoryCore (N3MC) — Free for Codex
 
 > **⚠️ How long memories are kept, and data size**
 >
-> - **Memories are not deleted.** Free has no feature that deletes old records; they stay after a year without changing any setting.
-> - **More data makes it slower.** The more records there are, the longer a search takes.
+> - **No automatic expiry.** Records remain until you explicitly remove them. Keep backups of important memories.
+> - **Data grows over time.** Search time and disk usage depend on the volume of records and the environment.
 
 > A NeuralNexusNote™ product
 
@@ -17,68 +13,41 @@ This project prioritizes Instructions over Static Code. Please read our Developm
 > 🇯🇵 **[Click here for the Japanese Documentation (日本語版)](./README_JP.md)**
 > 🛡️ **[Development Philosophy & AI-Native Policy](./PHILOSOPHY.md)**
 
-> I know Java and C#, but Python is completely new to me.
-> The code Codex generated — I built it without fully understanding it.
->
-> But I tested it, refined the specification, rebuilt it,
-> and shipped both Japanese and English versions — Free and Pro.
->
-> Because if I could do it, so can you.
->
-> The first draft of the specification was written by Copilot.
-> Codex turned it into working code. Gemini reviewed it.
-> Iterated across three AIs — that process is N3MemoryCore.
+This is the Codex adaptation of [N3MemoryCore Free for Claude Code](https://github.com/NeuralNexusNote/n3mc-free). This repository brings its instruction-led setup to Codex.
 
-N3MemoryCore gives Codex long-term memory across sessions.
-**Two install paths supported**: drop the spec into Codex and let it build the system, or `pip install` the reference build and run `n3mc --init`. Either way, no manual hook editing. (See [Setup](#setup) below.)
+**The primary workflow is to give Codex the instruction document and let it build N3MemoryCore for your environment.** A reference implementation is also provided for inspection and direct installation. Both paths are described below; MCP is not required.
 
-## Free or Lite? Which one to use
+## Choose your edition
 
-There are two free N3MemoryCore builds. **If this is your first time, start with Free (this repository).**
-
-| | **N3MC Free** (this repository) | **[N3MC MCP Lite](https://github.com/NeuralNexusNote/n3mcmcp-lite)** |
+| Edition | Integration | Where to start |
 |---|---|---|
-| Works with | Codex only | MCP clients: Codex, Codex Desktop, Cursor, Windsurf, … |
-| What gets saved | Every message, automatically (hooks) | What the AI decides to save (`save_memory`) |
-| How long it is kept | Until you delete it | 7 days, then deleted automatically |
-| What you need | Python 3.10+ | Python 3.10+, Docker (Redis Stack), and the MCP client settings |
-| Setup | `pip install n3memorycore-free`, then `n3mc --init` | Start Redis Stack, install, then register the server in your MCP client |
-| Good for | Beginners; long-term memory for Codex | Users who know MCP and Docker; short-lived working memory for a project |
+| **Free for Codex (this repository)** | Codex UserPromptSubmit / Stop hooks | [Instruction documents](#specification-files), then Path A |
+| [Free for Claude Code](https://github.com/NeuralNexusNote/n3mc-free) | Claude Code hooks | The Claude Code repository's instructions |
+| [MCP Lite](https://github.com/NeuralNexusNote/n3mcmcp-lite) | MCP | Its own requirements and installation guide |
 
-- **Choose Free** if you use Codex and want it to remember your conversations without extra software.
-- **Choose Lite** if you use another MCP client (Codex Desktop, Cursor, …), or you want memory that forgets by itself after a short project, and you are comfortable starting Docker and editing MCP settings.
-
----
+Use the instructions for your host application. Hook configuration and acceptance results are not interchangeable between editions.
 
 ## Features
 
 - 💾 **Stored locally** — Your memories are kept in a file on your own PC, not in any cloud service. Only the memories recalled for a turn are sent to Codex, together with your message ([details](#your-memory-stays-on-your-pc)).
-- 🔍 **Semantic search** — Finds relevant past conversations even when the exact words differ. Multilingual by default (`intfloat/multilingual-e5-base`) — works for Japanese, English, Chinese, Korean, and ~100 other languages out of the box. Swap to a language-specialised model via `config.json` if you need higher single-language precision.
+- 🔍 **Semantic search** — Finds relevant past conversations even when the exact words differ. Multilingual by default (`intfloat/multilingual-e5-base`) — supports multilingual retrieval, with accuracy depending on the question and stored content. Changing models requires checking dimensions and rebuilding embeddings; changing the configuration alone is not sufficient.
 - 🔄 **Persistent across sessions** — Pick up tomorrow where you left off today.
-- ⚡ **Works automatically** — Saving and searching happen automatically. No manual steps needed.
-- 🤖 **Multi-agent ready** — Multiple AI agents can share one memory DB; every record keeps the agent that wrote it (`agent_name`, `local_id`). Ranking each agent's own memories first is a Pro feature.
-- 🔗 **DB merge ready** — Databases built from the same specification are fully compatible. Transfer knowledge when handing off roles, or import memories accumulated in other environments — the DB structure is designed for integration from the ground up.
-- 💰 **Reduces token waste** — No more re-explaining past context. Memory search uses local embeddings (zero Codex tokens), and accurate context injection means fewer corrections and back-and-forth.
+- ⚡ **Works automatically** — After hook registration, trust and acceptance checks, prompts and final replies are captured and relevant history is retrieved automatically. Do-not-save requests and detected credentials are excluded; fenced code is replaced with `[code omitted]`, and images are not archived.
+- 🤖 **Multi-agent ready** — Multiple AI agents can share one memory DB; every record keeps the agent that wrote it (`agent_name`, `local_id`). These fields describe provenance, not authentication or access control.
+- 🔗 **Portable local data** — Back up the SQLite database together with its configuration. Check schema and embedding-model compatibility before migrating between implementations; automatic cross-edition merging is not promised.
+- 💬 **Less repeated explanation** — Retrieved history can help you resume earlier work. Embedding inference runs locally, but injected memories consume Codex input context; lower total token cost is not guaranteed.
 
 ## How It Works
 
-```
-User's message
-    │
-    ▼
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  1. Auto-save │────▶│ 2. Semantic   │────▶│ 3. Context    │
-│  Save last    │     │    search     │     │    injection   │
-│  response     │     │  Find related │     │  Feed to       │
-│  to DB        │     │  memories     │     │  Codex        │
-└──────────────┘     └──────────────┘     └──────────────┘
-                                                 │
-                                                 ▼
-                                          Codex responds
-                                          with full context
+```text
+User prompt
+    → UserPromptSubmit: search earlier records and save the user message
+    → Relevant history is passed to Codex
+    → Codex responds
+    → Stop: save the final reply with the same turn_id
 ```
 
-Powered by Codex's hook system. Everything happens automatically — no user action required.
+Automatic capture depends on both hooks being trusted and enabled in the Codex environment you use. Retrieved history can be incomplete or irrelevant; verify evidence before treating it as a current fact.
 
 ### AGENTS.md and searchable memory
 
@@ -95,28 +64,28 @@ An AI that remembers you is convenient, but it is natural to ask where those mem
 
 What does go over the network:
 
-- **The embedding model download** — On the first search, `intfloat/multilingual-e5-base` (~470 MB) is downloaded from Hugging Face. After that, the Hugging Face library may still check for model updates when the model loads; set `HF_HUB_OFFLINE=1` to stop this once the model is downloaded.
+- **The embedding model download** — On the first model load, `intfloat/multilingual-e5-base` is downloaded from Hugging Face. After that, the Hugging Face library may still check for model updates when the model loads; set `HF_HUB_OFFLINE=1` to stop this once the model is downloaded.
 - **What Codex reads** — Recalled memories are added to the turn's prompt and sent to the service processing the Codex conversation. N3MC does not upload the entire memory database, but the recalled parts become part of that conversation.
 
-## Free vs Pro
+## Instruction documents and reference implementation
 
-| | Free | Pro |
+The v1.9.0 instruction documents define the instruction-based build. The reference code also contains later CPU, lifecycle and recovery improvements. These improvements have **not** been added to those instruction documents. Regenerating from the instructions therefore does not reproduce every feature of the current reference code.
+
+| Capability | v1.9.0 instructions | Current reference code |
 |---|---|---|
-| Core features (save, search, auto) | ✅ | ✅ |
-| Refresh (dedup & update) | - | ✅ Auto-replaces outdated memories |
-| Session/environment bias | - | ✅ Prioritizes recent & local context |
-| GC (garbage collection) | - | ✅ Auto-cleanup of old memories |
-| Import/Export | - | ✅ Data migration & sharing |
-| Delete | - | ✅ Individual record deletion |
+| Local storage, hybrid search, Codex hooks | Included | Included |
+| Explicit turn supersession and forgetting | Not specified | Available |
+| Backup / restore CLI and full-metadata export | Not specified; SQLite backup procedure provided | Available |
+| Default weak-result filling (`min_results`) | 3 | 0; existing explicit settings are retained |
 
-**Start with Free.** You can upgrade to Pro later using the Upgrade specification.
+The reference build exposes these additional commands through `python -m n3memorycore.n3memory --help`. The historical Free/Pro comparison from the Claude Code edition is not a compatibility guarantee for this Codex adaptation.
 
 ## Specification Files
 
 | File | Description |
 |---|---|
-| `N3MemoryCore_v1.9.0_Free_JP.md` | Free edition (Japanese) |
-| `N3MemoryCore_v1.9.0_Free_EN.md` | Free edition (English) |
+| [N3MemoryCore_v1.9.0_Free_JP.md](N3MemoryCore_v1.9.0_Free_JP.md) | Codex Free instructions (Japanese) |
+| [N3MemoryCore_v1.9.0_Free_EN.md](N3MemoryCore_v1.9.0_Free_EN.md) | Codex Free instructions (English) |
 
 > 💡 **A note on annotations in the specification**
 > Throughout the specification file (Markdown), you'll find annotations describing the design intent behind each instruction — written to give you precise control over AI behavior. Before having Codex generate the code, take a moment to read through them. They contain more than just code: the logic behind how to work with AI effectively.
@@ -127,35 +96,47 @@ There are two supported setup paths. Pick whichever fits your style.
 
 ### Path A — AI-Native Setup (canonical)
 
-1. Pick a specification file from the table above
-2. Drop the file into the Codex prompt
-3. Say: "Please implement this."
+1. Prepare a dedicated empty folder and open Codex there. Keep it after installation: the hooks may execute code from this folder.
+2. Download one of the instruction documents above and give it to Codex.
+3. Ask: "Implement N3MemoryCore according to this instruction document. Use CPU only. Confirm the installation folder, preserve existing settings, and report which checks passed and which still require my actions."
+4. Let Codex generate and check the implementation. Restart Codex, inspect and trust the resulting hooks, then test a fresh chat over multiple turns.
 
-That's it. Codex writes the code, configures the hooks, and sets everything up.
-Setup takes roughly 15–30 minutes (varies by environment and model).
-Memory kicks in from the next session.
+The instructions use **Path A** for generation and **Path B** for direct installation. Implementation time depends on the environment, dependencies and model download. A generated implementation must pass its own acceptance checks; tests of the reference code do not establish that it works.
 
-### Path B — Quick Start with `pip`
+The user confirmed that Codex generated code from the instructions in a Hyper-V virtual machine and reported passing the appendix's three manual checks: data flow, CLI specification comparison, and saving with `--buffer` followed by `--search` in a separate session. Hook trust and automatic capture/recall in a fresh Codex chat are separate checks.
 
-If you'd rather skip the AI implementation step and use the reference build directly:
+### Both paths: trust and enable the Codex hooks
+
+Registration in `~/.codex/hooks.json` by `--init` or the generated implementation is separate from trusting and enabling the commands in Codex. Check them in this order:
+
+1. Open `~/.codex/hooks.json`. Under `UserPromptSubmit` and `Stop`, inspect the Python path and the `n3memorycore.codex_entry --prompt` / `--stop` commands. For generated code, inspect the commands it actually produced.
+2. Exit and restart Codex. During the Hyper-V installation, the new hooks could be approved after restarting.
+3. Open `/hooks` in a Codex chat. Inspect, trust and enable **both** UserPromptSubmit and Stop. Both are needed to capture a prompt and its final reply as one turn.
+4. Open a new chat, provide a short fictional passphrase, and check that the prompt and reply appear in `--list`. In another new chat, ask for the passphrase without repeating it.
+
+Two entries in `hooks.json` and successful manual `--buffer` / `--search` commands do not establish that Codex ran the hooks.
+
+### Path B — Install the reference code
+
+This path uses the code in this repository. It does not test whether Codex can implement the instruction document.
 
 #### 1. Install
 
-The simplest install — straight from PyPI (no clone needed):
+Use a dedicated Python environment. The distribution currently shares the name `n3memorycore-free` with the original edition, so do not install both into the same environment. The PyPI command for the original edition is not the installation route for this Codex checkout.
 
-```bash
-pip install n3memorycore-free
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/NeuralNexusNote/n3mc-free-codex.git
+cd n3mc-free-codex
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m n3memorycore.n3memory --init
 ```
 
-Or, if you want a local checkout to read / modify / contribute:
+In subsequent examples, `python` means that same environment's interpreter; on Windows use `.\.venv\Scripts\python.exe`. Do not delete or move the environment after hook registration.
 
-```bash
-git clone https://github.com/NeuralNexusNote/n3mc-free.git
-cd n3mc-free
-pip install -e .          # editable install
-```
-
-Requirements: Python 3.10+. The first server start will download the embedding model (`intfloat/multilingual-e5-base`, ~470 MB) — expect a 2–10 minute one-time delay.
+Requirements: Python 3.10+ and a Codex environment that supports both hooks. The reference model uses CPU. Initial dependency/model downloads require a network connection, disk space and time; later searches can use the cached model.
 
 #### 2. Connect to Codex
 
@@ -163,25 +144,25 @@ Requirements: Python 3.10+. The first server start will download the embedding m
 python -m n3memorycore.n3memory --init
 ```
 
-This prepares `~/.n3mc/` and registers UserPromptSubmit and Stop commands in the user-global `~/.codex/hooks.json`. It preserves other hooks and backs up the file before changing it. Commands use the absolute Python interpreter path used for installation. Review, trust, and enable both commands in Codex `/hooks`.
+This prepares `~/.n3mc/` and registers UserPromptSubmit and Stop commands in the user-global `~/.codex/hooks.json`. It preserves other hooks and backs up the file before changing it. Commands use the absolute Python interpreter path used for installation. Follow the shared steps above: restart Codex, then inspect, trust and enable both commands in `/hooks`.
 
 #### 3. Verify the hook registration
 
 Confirm that UserPromptSubmit and Stop each contain one `n3memorycore.codex_entry` command in `~/.codex/hooks.json`. Also confirm both are trusted and enabled in `/hooks`. JSON registration alone does not prove automatic capture.
 
-#### 4. Restart Codex
+#### 4. Open a new chat
 
-Close **every** running Codex session (terminal CLI windows, IDE extensions like VS Code's "Codex" panel, etc.) and start a fresh one. Hooks are read at session startup; sessions started before `n3mc --init` will not pick up the new hooks.
+After trusting and enabling the hooks, open a fresh Codex chat. Verify actual prompt and Stop execution rather than relying only on the presence of `hooks.json`.
 
 #### 5. Confirm it's working
 
 In a fresh Codex session, send any message. After Codex responds, run:
 
 ```bash
-n3mc --list
+python -m n3memorycore.n3memory --list
 ```
 
-You should see at least two records — one with a `[user]` prefix (your message) and one with a `[claude]` prefix (Codex's response). If the list is empty, jump to **Troubleshooting** below.
+You should see at least two records — one with a `[user]` prefix (your message) and one with a `[claude]` prefix (Codex's response). The legacy `[claude]` label is retained for compatibility; in this edition it stores Codex's reply. Then verify recall in another chat. If capture is missing, see **Troubleshooting** below.
 
 #### Optional: change where data lives
 
@@ -189,15 +170,15 @@ Override the data location by setting `N3MC_HOME=/path/to/dir`. It is read at ru
 
 ---
 
-### Troubleshooting (Path B)
+### Troubleshooting (both paths)
 
 If capture is missing, inspect trust and enabled state for both hooks in Codex `/hooks`, then open a new chat. Hook failures appear on stderr. Check `~/.n3mc/.memory/server.log` and `audit.log`. If the model is not cached, check network access for the initial download.
 
 ### What to expect after setup
 
-Once setup is complete, everything works automatically from the next session:
+After the hook trust and multi-turn checks pass:
 - Past conversations relevant to your current message are retrieved and injected automatically
-- Codex responds with full context ("Regarding what we discussed last time...")
+- Codex can use retrieved excerpts when relevant; retrieval does not guarantee that every earlier detail will be available
 - Saving and searching happen in the background — no action needed on your part
 
 ### Tuning recall (vector_min_cos)
@@ -220,16 +201,11 @@ quotes.
 
 ### Weak matches (min_results)
 
-When fewer than 3 records pass the relevance floors, N3MC adds the closest
-of the records it dropped, up to 3 in total, under a separate heading
-`## Possibly related (weak matches — may be unrelated)`. Codex is told to use
-them only when they are actually relevant. This keeps a question from getting
-no memory at all, at the cost of up to 3 extra, mostly unrelated chunks per
-turn. Set `"min_results": 0` in `~/.n3mc/config.json` to turn it off, or
-another number to change the count.
+The v1.9.0 instruction-based build specifies `min_results=3`: if fewer records pass the relevance filters, it can fill from dropped candidates under `## Possibly related (weak matches — may be unrelated)`. Filling is limited by the available candidates and does not guarantee a result.
 
-Old records are never hidden by their age: age only lowers their rank below
-newer records of the same relevance.
+The current reference code defaults to `min_results=0`, so it does not force weak results into the context. An existing `config.json` with an explicit value of 3 keeps that behavior. Set `"min_results": 0` to disable filling. Lower thresholds and more candidates can improve recall but also introduce unrelated material.
+
+Age alone does not exclude a record from search. In the reference build, explicit supersession or forgetting does exclude a turn from normal retrieval.
 
 ### Backup and restore
 
@@ -241,29 +217,29 @@ Ask Codex to remove N3MemoryCore after confirming a backup of `~/.n3mc/`. Remove
 
 ## ID Hierarchy
 
-N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
+N3MemoryCore uses the following provenance fields. In addition, Codex supplies `turn_id` to associate the prompt and final reply from one turn; it is different from the record `id`.
 
 | ID | Stored in | Generated | Granularity | Purpose |
 |---|---|---|---|---|
 | `id` (PK) | DB record | Per record (UUIDv7, time-ordered) | **One record** | Unique identifier for each memory — used for deletion and dedup |
 | `owner_id` | `config.json` | First startup (UUIDv4) | **Owner / N3MC server** | Identifies whose data this is — for shared/multi-user scenarios and import provenance |
-| `session_id` | In-memory or supplied by host | Per task / project / conversation (UUIDv4) | **Task / project / conversation** | Groups memories that belong to one task / project / conversation. In Free, drives the `b_session` ranking bias (match=1.0, mismatch=0.6) so the ongoing exchange ranks above unrelated past sessions |
+| `session_id` | In-memory or supplied by host | Supplied by Codex as `thread_id` | **Task / project / conversation** | Groups memories that belong to one task / project / conversation. In Free, drives the `b_session` ranking bias (match=1.0, mismatch=0.6) so the ongoing exchange ranks above unrelated past sessions |
 | `local_id` (agent_id) | `config.json` / API | First startup (UUIDv4), or per request | **Agent / install** | UUIDv4 identifier for the speaking agent. Each agent gets its own UUID in multi-agent setups (in Free, stored but not used in ranking; `b_local` is a Pro feature) |
-| `agent_name` | DB record | Per buffer call (free-form string) | **Agent display name** | Human-readable label for the agent (e.g. `"claude-code"`) |
+| `agent_name` | DB record | Per buffer call (free-form string) | **Agent display name** | Human-readable label for the agent (e.g. `"codex"`) |
 
 ```
 owner_id  (one N3MC server / data owner)
   └── session_id  (one task / project / conversation)
         └── local_id  (the speaking agent within that session)
-              ├── agent_name  (its display name: "claude-code", etc.)
+              ├── agent_name  (its display name: "codex", etc.)
               └── id  (one memory record)
 ```
 
 ## Requirements
 
-- **Codex** (required)
+- **Codex** with UserPromptSubmit and Stop hook support and a way to inspect/trust the commands
 - **Python 3.10+**
-- **OS**: Windows 11 and Ubuntu (tested). macOS is not supported.
+- **Validation**: Reference-code tests ran on Windows / Python 3.12. The user reported successful instruction-based generation and manual checks ①–③ in Hyper-V. Automatic hook capture and recall in a fresh Codex chat, and Linux/macOS operation, have not been verified.
 
 > To check if Python is installed, run `python --version` in your terminal.
 > If missing, Codex will guide you during setup.
@@ -276,12 +252,12 @@ N3MemoryCore is built from a specification, so extending it is as simple as aski
 - **PostgreSQL migration** — Move from SQLite to PostgreSQL + pgvector for team-scale deployments
 - **Custom search logic** — Tune bias coefficients and ranking formulas
 - **Alternative embedding models** — Swap in a different model to suit your use case
-- **Keyword-search tokenizer** — The default FTS5 `trigram` tokenizer was chosen because it works both for languages written without spaces (Japanese, Chinese, …) and for languages like English (the PyPI package is used in every country). Adapt the final tokenizer to your own language and environment (e.g. `porter unicode61` to fold English word forms, or a morphological analyzer for higher Japanese precision). Codex can do it for you, including rebuilding the existing DB's FTS index
+- **Keyword-search tokenizer** — The default FTS5 `trigram` tokenizer was chosen because it works both for languages written without spaces (Japanese, Chinese, …) and for languages like English (this project targets multilingual conversations). Adapt the final tokenizer to your own language and environment (e.g. `porter unicode61` to fold English word forms, or a morphological analyzer for higher Japanese precision). Codex can do it for you, including rebuilding the existing DB's FTS index
 - **Custom ID fields** — Add fields like `project_id` or `tag` to organize memories your way
 - **PDF import** — Extract text from PDF files and store them as searchable memories
 - **Hashtag support** — Codex auto-tags memories with `#hashtags` for filtered search (e.g. `--search "#AWS"`) — works with existing FTS, no DB changes needed
 
-Just load the specification into Codex and say what you want to add.
+These are customization ideas, not features already supplied by this edition. Load the specification into Codex, describe the change, and validate the resulting implementation.
 
 ## ⚠️ Disclaimer
 
