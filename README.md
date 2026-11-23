@@ -235,11 +235,16 @@ Where the hooks are registered follows `CODEX_HOME`. For testing, point `N3MC_CO
 
 ### Route B — AI-native setup
 
-Have Codex generate the code from the specification:
+Have Codex generate the code from the specification. Codex handles hook registration; the only manual setup action is reviewing and trusting the hooks:
 
 1. Create a dedicated folder and put one of the specifications from the table above in it
 2. Open Codex in that folder
-3. Give it the specification and ask it to implement the package in that folder
+3. Give it the specification and ask:
+
+   > Implement N3MemoryCore from this specification. Install it in the Python environment I will keep, run `n3mc --init` to register and verify both Codex hooks, and tell me where to review and trust them. After I approve them, automatically run the autonomous evaluation in §6 and pytest in §7, then report the results. Send the test chat messages and run the verification commands yourself.
+
+4. After Codex reports successful registration, open **Settings → Hooks** in the desktop app or `/hooks` in the CLI. Review and trust both `N3MC Free memory` handlers, `UserPromptSubmit` and `Stop`. If either is missing or its command differs from what you expect, do not trust it; ask Codex to investigate
+5. After approval, Codex runs the §6 evaluation (including capture in a new chat and recall from another chat) and §7 pytest, then reports the results. You do not need to send the test messages or run verification commands. Hooks do not run before they are trusted
 
 The generated code stays in that folder. If you delete or move the folder later, the memory stops.
 

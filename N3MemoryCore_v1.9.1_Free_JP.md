@@ -9,7 +9,7 @@
 1. 専用フォルダに Python 3.10 以上を用意する。再作成では、ソースと未コミットの変更を退避してからパッケージを入れ替える。個人データと Codex の設定はソースツリーの外に置く。
 2. 再作成する場合は Codex に本書を渡し、そのフォルダへの実装を依頼する。リファレンス実装を使う場合は既存リポジトリを使う。いずれもソースのルートで `python -m pip install -e ".[test]"` を実行する。
 3. まず `N3MC_HOME` と `N3MC_CODEX_HOOKS_PATH` に一時パスを指定し、空いているループバックポートを使って §6 のテストを行う。
-4. ローカルの Codex で有効にするには、使い続ける Python 環境から `n3mc --init` を実行する。デスクトップ版の **設定 → Hooks**、または CLI の `/hooks` で両フックを確認して信頼する。利用者が実際に行うテストは §6.1–6.2 に従う。
+4. ローカルの Codex で有効にするときは、実装担当の Codex が使い続ける Python 環境にインストールし、その環境から `n3mc --init` を実行して両フックを登録・検証する。登録が成功したら、登録先と `UserPromptSubmit`・`Stop` のコマンドを利用者へ示す。利用者が行うセットアップ操作は、デスクトップ版の **設定 → Hooks**、または CLI の `/hooks` で両フックを確認して信頼することだけ。信頼確認を代行したり、省略したりしない。承認後、Codex が §6 の自律評価（§6.1–6.2 の実機テストを含む）と §7 の pytest を自動実行し、結果を報告する。未確認なら保存可能と断言しない。
 
 ## 2. パッケージとデータ
 
@@ -879,9 +879,9 @@ python -m n3memorycore.n3memory --show-turn <turn_id>
 ---
 
 ## 6. 自律評価（[N3MC v1.9.1 Evidence Report]）
-実装完了後、以下のテストを自律解決し、満点（⭐⭐⭐⭐⭐）を目標に結果を報告せよ。
+フック承認後、Codex が以下のテストを自律実行し、満点（⭐⭐⭐⭐⭐）を目標に結果を報告せよ。承認前に必要な隔離テストを行ってもよいが、承認後に §6 の結果をそろえ、続けて §7 の pytest を実行する。テスト用の入力、チャット作成、確認コマンドを利用者に代行させない。
 
-> **実装完了の定義**: テスト 1〜6 を一時環境で自律実施 → `n3mc --init` で登録し、利用者がフックを信頼 → テスト 7〜10 を確認して Evidence Report に記録する。満点（⭐⭐⭐⭐⭐）を目標とし、未実施・不合格はそのまま示す。
+> **実装完了の定義**: Codex が使い続ける Python 環境へインストールし、`n3mc --init` で登録・検証 → 利用者に２つのフックの信頼確認を案内 → 承認後、Codex が §6 のテスト 1〜10 と §6.1–6.2 を自動実行 → 続けて §7 の pytest を実行 → Evidence Report に記録する。登録・信頼・実機動作・pytest を別々に報告し、未実施・不合格はそのまま示す。
 
 1. **常駐速度 & プロセス管理**: `--search` の応答時間を計測し記録せよ（達成目標: CPU 環境で 2.0s 以内）。PIDファイルの生成・削除・再起動が正常に機能することを確認せよ。
 
@@ -915,7 +915,8 @@ python -m n3memorycore.n3memory --show-turn <turn_id>
    - `meta` 表の `fts_punct_cleaned` の行がまた書かれること
    - 再度 `n3mc --repair` を実行しても FTS クリーニングがスキップされること（キーにより全件スキャンが回避される）
 
-7. **フック統合テスト**: Codex の実セッションで以下を確認せよ。
+7. **フック統合テスト**: 承認後、Codex が実セッションを起動・操作して以下を確認せよ。新しいチャットを自動起動できない環境では、単体のフック呼び出しだけで代替合格にせず、この項目を未実施と報告する。
+   チャット A・B は利用可能な Codex のチャット操作機能、または認証済み CLI の `codex exec` と `codex exec resume` で操作してよい。通常のフック信頼を使い、`--dangerously-bypass-hook-trust` は使わない。A の３ターンは同じセッションを再開し、B は別セッションにする。実行したセッション ID と検証結果を記録する。
    1. **グローバルフック登録の存在確認**（必須ゲート、§4）。Free をインストールした Python 環境で次を実行する。
       ```sh
       python -c "import json; from pathlib import Path; from n3memorycore.codex_install import hooks_path, _owned; h=json.loads(Path(hooks_path()).read_bytes())['hooks']; expected=(('UserPromptSubmit','--prompt'),('Stop','--stop')); assert all(sum(_owned(item, flag) for group in h.get(event,[]) for item in group.get('hooks',[])) == 1 for event,flag in expected), 'N3MC Free hook missing or duplicated'; print('OK')"
@@ -942,8 +943,8 @@ python -m n3memorycore.n3memory --show-turn <turn_id>
 
 ### 6.1 フックを有効にして、3 ターンの自動保存を確認する
 
-1. Codex デスクトップ版では **設定 → Hooks** を開きます。Codex CLI では `/hooks` を開きます。**N3MC Free memory** の `UserPromptSubmit` と `Stop` が登録され、両方が有効かつ信頼済みであることを確認します。一覧に出ない場合は §4 の登録先を確認します。
-2. N3MemoryCore のソースフォルダとは別のフォルダで、ローカルの新しい Codex チャット **A** を開きます。次の入力を上から順に **1 通ずつ**送り、その都度、応答が最後まで表示されるのを待ちます。三つの入力をまとめて送ると 1 ターンになります。
+1. 利用者による承認後、Codex は **N3MC Free memory** の `UserPromptSubmit` と `Stop` が登録され、両方が有効かつ信頼済みであることを確認する。一覧に出ない場合は §4 の登録先を調べる。
+2. Codex が N3MemoryCore のソースフォルダとは別のフォルダで、ローカルの新しい Codex チャット **A** を起動する。次の入力を上から順に **1 通ずつ**自動送信し、その都度、応答の完了を待つ。三つの入力をまとめて送ると 1 ターンになるため不可。
 
    ```text
    保存テスト1。架空の浮遊都市ソラニアの合言葉は「琥珀のペンギンQ47」です。合言葉をそのまま一行で返してください。
@@ -957,7 +958,7 @@ python -m n3memorycore.n3memory --show-turn <turn_id>
    保存テスト3。記録確認の印として「テスト完了R39」とだけ返してください。
    ```
 
-3. N3MemoryCore Free を入れた Python 環境のターミナルで、次の確認コマンドを実行します。複数の版を使っている場合は Free の実行環境とデータ先を確認してください。Free の既定のデータ先は `~/.n3mc` です。
+3. Codex が N3MemoryCore Free を入れた Python 環境で、次の確認コマンドを実行する。複数の版を使っている場合は Free の実行環境とデータ先を確認する。Free の既定のデータ先は `~/.n3mc`。
 
    ```sh
    n3mc --list --format jsonl
@@ -973,7 +974,7 @@ python -m n3memorycore.n3memory --show-turn <turn_id>
 
 ### 6.2 別チャットからの取り出しと保存しない指定を確認する
 
-1. チャット A とは別の作業フォルダで、新しい Codex チャット **B** を開きます。合言葉や番号の値を入力に含めず、次の質問を 1 通ずつ送ります。
+1. Codex がチャット A とは別の作業フォルダで、新しい Codex チャット **B** を起動する。合言葉や番号の値を入力に含めず、次の質問を 1 通ずつ自動送信する。
 
    ```text
    前のチャットで登録した架空の浮遊都市ソラニアの合言葉は何ですか？ 見つからなければ「見つからない」と答えてください。
@@ -984,7 +985,7 @@ python -m n3memorycore.n3memory --show-turn <turn_id>
    ```
 
    **合格条件**は、各質問の応答にチャット A で指定した値が示されることです。フック出力を確認できる環境では、`# Recalled Memory Context` にチャット A の記録が含まれることも確認します。ほかの記憶フックも有効な場合は、Free のフック出力を確認するか、Free だけを有効にしたテスト用環境で確認します。
-2. チャット B で次の入力を送り、応答が終わったあとで再度 `n3mc --list --format jsonl` を実行します。
+2. Codex がチャット B で次の入力を送信し、応答が終わったあとで再度 `n3mc --list --format jsonl` を実行する。
 
    ```text
    このターンを保存しないでください。テスト用の印は「青いカメZ68」です。この印だけを返してください。
@@ -997,7 +998,7 @@ python -m n3memorycore.n3memory --show-turn <turn_id>
 
 ## 7. 自動テスト（pytest）
 
-> **目的**: 手動 Evidence Report を補完する、反復実行可能な自動回帰テスト。プロジェクトルートから `python -m pytest tests/ -v` で実行。
+> **実行時点**: フック承認後、§6 の自律評価に続けて Codex がプロジェクトルートから `python -m pytest tests/ -v` を自動実行し、成功・失敗・スキップを Evidence Report に記録する。
 >
 > **前提**: `pip install pytest httpx`
 >
@@ -1200,10 +1201,10 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 モデルを **Sol** に設定し、以下を貼り付けてください。
 
 ```
-この指示書に従って N3MemoryCore を実装してください。
+この指示書に従って N3MemoryCore を実装してください。使い続ける Python 環境へインストールし、`n3mc --init` で Codex の２つのフックを登録・検証してください。登録が済んだら私に信頼確認する画面と対象を案内し、承認後は §6 の自律評価と §7 の pytest を自動実行して結果を報告してください。テスト用チャットの入力や確認コマンドも自分で実行してください。
 ```
 
-Sol がコード生成と隔離環境での検証を行います。実機フックは §6 のテスト 7 に沿って利用者が信頼します。完了したらフェーズ 2 に進んでください。
+Sol がコード生成、必要な隔離確認、インストール、フック登録まで行います。登録成功を確認してから、利用者はデスクトップ版の **設定 → Hooks** または CLI の `/hooks` で `N3MC Free memory` の `UserPromptSubmit` と `Stop` を確認し、それぞれ信頼します。承認後は Codex が §6 の自律評価と §7 の pytest を続けて実行し、結果を報告します。利用者にテスト文の送信や確認コマンドの実行を求めません。登録・信頼・実機動作が未確認なら、保存可能とは案内しません。完了したらフェーズ 2 に進んでください。
 
 ---
 
