@@ -2,7 +2,7 @@
 
 User-visible changes to N3MemoryCore Free for Codex.
 
-## [1.9.1] - Unreleased
+## [1.9.1] - 2026-11-23
 
 ### Added
 - CPU-only inference in the reference build.
@@ -10,6 +10,7 @@ User-visible changes to N3MemoryCore Free for Codex.
 - Verified SQLite backup into a new folder, restore into a new home and full-metadata JSONL export.
 - Record and turn identifiers in retrieved context, plus an output length limit.
 - A GitHub Actions workflow that builds the package and publishes it to PyPI from a release tag.
+- Published on PyPI as `n3memorycore-free-codex`.
 
 ### Changed
 - Retired turns are excluded from normal search before result limits apply.

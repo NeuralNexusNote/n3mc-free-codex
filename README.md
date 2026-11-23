@@ -188,7 +188,13 @@ Two ways to install are supported.
 
 #### 1. Install
 
-This edition is not on PyPI. Get the repository and install from it. Run this in the Python environment you intend to keep.
+Install from PyPI, or from the repository. Run this in the Python environment you intend to keep.
+
+```bash
+python -m pip install n3memorycore-free-codex
+```
+
+To install from the repository instead:
 
 ```bash
 git clone https://github.com/NeuralNexusNote/n3mc-free-codex.git

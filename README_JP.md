@@ -188,7 +188,13 @@ AI が覚えていてくれるのは便利ですが、その記憶がどこに�
 
 #### 1. インストール
 
-この版は PyPI に出していません。リポジトリを取得して入れます。使い続ける Python 環境で実行してください。
+PyPI から入れるか、リポジトリを取得して入れます。使い続ける Python 環境で実行してください。
+
+```bash
+python -m pip install n3memorycore-free-codex
+```
+
+リポジトリから入れるときは、次のようにします。
 
 ```bash
 git clone https://github.com/NeuralNexusNote/n3mc-free-codex.git
