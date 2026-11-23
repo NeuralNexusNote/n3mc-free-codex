@@ -9,7 +9,7 @@ Build persistent conversation memory for local Codex. Use **Sol** for implementa
 1. Use a dedicated directory with Python 3.10 or newer. For a rebuild, back up the source and uncommitted work before replacing the package. Keep personal memory data and Codex settings outside the source tree.
 2. To regenerate, give Codex this document and request an implementation in that directory. For the reference implementation, use the existing repository. In either case, install from the source tree with `python -m pip install -e ".[test]"`.
 3. First verify the build with temporary `N3MC_HOME` and `N3MC_CODEX_HOOKS_PATH` values and a free loopback port. Run the checks in §6.
-4. To activate for local Codex, run `n3mc --init` in the Python environment you intend to keep. Review and trust both handlers in desktop **Settings → Hooks** or CLI `/hooks`. Follow the hands-on checks in §§6.1–6.2.
+4. To activate local Codex, the implementing Codex agent installs the package in the Python environment the user will keep, runs `n3mc --init` there, and verifies both hook registrations. After successful registration, show the user the destination and the `UserPromptSubmit` and `Stop` commands. The user's only manual setup action is to review and trust both handlers in desktop **Settings → Hooks** or CLI `/hooks`. Do not trust them on the user's behalf or skip this step. After approval, Codex automatically runs the autonomous evaluation in §6 (including the live checks in §§6.1–6.2) and pytest in §7, then reports the results. Do not claim capture works until it has been checked.
 
 ## 2. Package and data
 
@@ -880,9 +880,9 @@ After computing scores, `hybrid_search` shapes the results in the following orde
 ---
 
 ## 6. Autonomous Evaluation ([N3MC v1.9.1 Evidence Report])
-After implementation is complete, run the following tests autonomously and aim for a perfect score (⭐⭐⭐⭐⭐). Report the actual results.
+After hook approval, Codex runs the following tests autonomously and aims for a perfect score (⭐⭐⭐⭐⭐). Preliminary isolated tests may run before approval, but complete the §6 results after approval, then run pytest in §7. Do not ask the user to create test chats, send test messages, or run verification commands.
 
-> **Definition of "implementation complete"**: Run tests 1–6 in isolation → register with `n3mc --init` and have the user trust the hooks → verify tests 7–10 and record the results in the Evidence Report. Aim for ⭐⭐⭐⭐⭐ and report failures or unrun checks.
+> **Definition of "implementation complete"**: Codex installs into the persistent Python environment and registers and verifies hooks with `n3mc --init` → guides the user through trusting both hooks → after approval, automatically runs §6 tests 1–10 and §§6.1–6.2 → runs pytest in §7 → records the results in the Evidence Report. Report registration, trust, live operation, and pytest separately, including failures or unrun checks.
 
 1. **Resident Speed & Process Management**: Measure and record the response time of `--search` (target: up to 2.0s on CPU). Verify that PID file creation, deletion, and restart function correctly.
 
@@ -918,7 +918,8 @@ After implementation is complete, run the following tests autonomously and aim f
    - The `meta` row `fts_punct_cleaned` is written again
    - Running `n3mc --repair` again skips FTS cleaning (full-table scan is avoided due to the key)
 
-7. **Hook integration test**: Verify the following in a real Codex session.
+7. **Hook integration test**: After approval, have Codex start and operate real Codex sessions to verify the following. If the environment cannot start new chats automatically, do not count direct hook calls as a live pass; report this item as not run.
+   Operate chats A and B through available Codex chat controls or an authenticated CLI using `codex exec` and `codex exec resume`. Use normal persisted hook trust; do not use `--dangerously-bypass-hook-trust`. Resume the same session for A's three turns and start a separate session for B. Record session IDs and verification results.
    1. **Verify global hook registration** (mandatory gate, §4). From the Python environment where you installed Free, run:
       ```sh
       python -c "import json; from pathlib import Path; from n3memorycore.codex_install import hooks_path, _owned; h=json.loads(Path(hooks_path()).read_bytes())['hooks']; expected=(('UserPromptSubmit','--prompt'),('Stop','--stop')); assert all(sum(_owned(item, flag) for group in h.get(event,[]) for item in group.get('hooks',[])) == 1 for event,flag in expected), 'N3MC Free hook missing or duplicated'; print('OK')"
@@ -945,8 +946,8 @@ After implementation is complete, run the following tests autonomously and aim f
 
 ### 6.1 Enable the hooks and check three turns of automatic capture
 
-1. In the Codex desktop app, open **Settings → Hooks**. In the Codex CLI, open `/hooks`. Confirm that both **N3MC Free memory** handlers, `UserPromptSubmit` and `Stop`, are registered, enabled, and trusted. If the handlers are missing, check the registration path in §4.
-2. Open a new local Codex chat **A** in a directory other than the N3MemoryCore source directory. Send each of the following messages **separately**, waiting for the complete reply each time. Pasting all three together creates one turn.
+1. After user approval, Codex confirms that both **N3MC Free memory** handlers, `UserPromptSubmit` and `Stop`, are registered, enabled, and trusted. If either is missing, inspect the registration path in §4.
+2. Codex starts a new local Codex chat **A** in a directory other than the N3MemoryCore source directory. Send each of the following messages **separately** without user input, waiting for the complete reply each time. Combining all three creates one turn and is invalid.
 
    ```text
    Save test 1. The passphrase of the fictional floating city Solania is "Amber Penguin Q47". Reply with the exact passphrase on one line.
@@ -960,7 +961,7 @@ After implementation is complete, run the following tests autonomously and aim f
    Save test 3. Reply only with "Test Complete R39" as a marker for this check.
    ```
 
-3. Use a terminal in the Python environment where you installed N3MemoryCore Free. If you have several editions installed, verify that you are using Free’s command and data location. Free uses `~/.n3mc` by default.
+3. Codex runs the following verification command in the Python environment where it installed N3MemoryCore Free. If several editions are installed, verify Free’s command and data location. Free uses `~/.n3mc` by default.
 
    ```sh
    n3mc --list --format jsonl
@@ -976,7 +977,7 @@ After implementation is complete, run the following tests autonomously and aim f
 
 ### 6.2 Check retrieval from a new chat and the do-not-save request
 
-1. Open a new local Codex chat **B** in a directory different from chat A. Send the following questions separately without including the answers.
+1. Codex starts a new local Codex chat **B** in a directory different from chat A. Send the following questions separately without including the answers or asking the user to send them.
 
    ```text
    What passphrase did we record for the fictional floating city Solania? Say "not found" if you cannot find it.
@@ -987,7 +988,7 @@ After implementation is complete, run the following tests autonomously and aim f
    ```
 
    **Pass** when the replies supply the values you entered in chat A. If your client exposes the hook output, verify that `# Recalled Memory Context` contains the records from chat A. If another memory hook is enabled, use Free’s hook output or test in an environment with only Free enabled to establish which hook supplied the records.
-2. In chat B, send this message. Wait for the reply, then run `n3mc --list --format jsonl` again.
+2. Codex sends this message in chat B. Wait for the reply, then run `n3mc --list --format jsonl` again.
 
    ```text
    Do not save this turn. The test marker is "Blue Turtle Z68". Reply with only that marker.
@@ -1000,7 +1001,7 @@ After implementation is complete, run the following tests autonomously and aim f
 
 ## 7. Automated Tests (pytest)
 
-> **Purpose**: Supplement the manual Evidence Report with repeatable, automated regression tests. Run with `python -m pytest tests/ -v` from the project root.
+> **When to run**: After hook approval and the §6 autonomous evaluation, Codex automatically runs `python -m pytest tests/ -v` from the project root and records passes, failures, and skips in the Evidence Report.
 >
 > **Prerequisites**: `pip install pytest httpx`
 >
@@ -1203,10 +1204,10 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 Set the model to **Sol** and paste the following:
 
 ```
-Please implement N3MemoryCore according to this specification.
+Implement N3MemoryCore according to this specification. Install it in the Python environment I will keep, run `n3mc --init` to register and verify both Codex hooks, and tell me where to review and trust them. After I approve them, automatically run the autonomous evaluation in §6 and pytest in §7, then report the results. Send the test chat messages and run the verification commands yourself.
 ```
 
-Sol generates the code and verifies it in isolation. For live Codex hooks, the user reviews and trusts them as described in test 7. Then proceed to Phase 2.
+Sol generates the code, runs preliminary isolated checks as needed, installs it, and registers the hooks. After registration succeeds, the user opens desktop **Settings → Hooks** or CLI `/hooks`, reviews both `N3MC Free memory` handlers (`UserPromptSubmit` and `Stop`), and trusts each one. Codex then runs the §6 autonomous evaluation and §7 pytest and reports the results. Do not ask the user to send test messages or run verification commands. Do not claim capture works while registration, trust, or live operation is unverified. Then proceed to Phase 2.
 
 ---
 
