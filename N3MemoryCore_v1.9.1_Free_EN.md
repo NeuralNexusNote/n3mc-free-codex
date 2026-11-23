@@ -141,7 +141,7 @@ from .database import (
 
 ```python
 # n3memorycore/n3memory.py
-from .paths import HOME_DIR, MEMORY_DIR, DB_PATH, PID_FILE, AUDIT_LOG, CONFIG_FILE, NOTICES_FILE, claude_paths
+from .paths import HOME_DIR, MEMORY_DIR, DB_PATH, PID_FILE, AUDIT_LOG, CONFIG_FILE, NOTICES_FILE
 from .core.database import (
     get_connection, init_db, migrate_schema, insert_memory, insert_memory_once,
     check_exact_duplicate, search_vector, find_unindexed_memories,
@@ -149,7 +149,7 @@ from .core.database import (
 )
 from .core.processor import (
     embed_passage, cosine_sim_from_l2, hybrid_search,
-    chunk_text, add_chunk_prefixes, purify_text, render_memory_context,
+    purify_text, render_memory_context,
 )
 ```
 
@@ -179,7 +179,7 @@ from .core.processor import (
 
 #### Server check and replacement (`ensure_server`)
 
-The CLI classifies the `/health` response as follows (`_health_decision(health)`, which returns one of `'ok'`, `'stale'`, `'foreign'`, `'legacy'`, `'none'`). Only the commands that use the server run this check (`--buffer`, `--search`, `--repair`, `--hook-submit`, `--save-claude-turn`); `--list`, `--recall-thread` and `--show-turn` (which read our own DB directly), `--stop` and `--init` do not:
+The CLI classifies the `/health` response as follows (`_health_decision(health)`, which returns one of `'ok'`, `'stale'`, `'foreign'`, `'legacy'`, `'none'`). Only the commands that use the server (`--buffer`, `--search`, `--repair`) and the hooks of §4 run this check; `--list`, `--recall-thread` and `--show-turn` (which read our own DB directly), `--stop` and `--init` do not:
 
 | Response | Verdict | Action |
 |---|---|---|
@@ -217,7 +217,7 @@ The CLI classifies the `/health` response as follows (`_health_decision(health)`
 
 `ensure_server` returns False, stores that server's `root` in the module variable `_FOREIGN_SERVER_ROOT`, and emits the notice `port_conflict`. In this state, **to keep records from leaking into another folder's DB**:
 
-- Saves (hooks, `--buffer`, `--save-claude-turn`) are written directly to our own DB via `_buffer_direct` (embeddings are added by `/repair` once our own server runs).
+- Saves (hooks, `--buffer`) are written directly to our own DB via `_buffer_direct` (embeddings are added by `/repair` once our own server runs).
 - The Codex prompt hook searches its own SQLite FTS indexes (§4). CLI `--search` reports the condition as `# Recalled Memory Context\n\n_(memory search unavailable: another N3MC folder's server is using port <port>)_\n`.
 - `--repair` returns without doing anything and prints the reason as one line to stderr. It does not send `/repair` either.
 - `--list`, `--recall-thread`, and `--show-turn` already read our own DB directly, so they work unchanged.
@@ -234,7 +234,7 @@ Notices that require human action (`stale_server`, `port_conflict`, `server_star
 
 In tests, always point `NOTICES_FILE` and `AUDIT_LOG` to a temporary folder (never write to the real `~/.n3mc`).
 - **Response Target**: Around 0.7s (total of embedding generation + DB search). Treat this as a target, not a strict requirement, as it depends on hardware, OS, and model cache state.
-- **First Start**: Because model preloading runs before uvicorn starts, every start of the server takes time, not only the first one. With the model already cached, a hook that had to start the server took 41.2 seconds on the development PC (2026-11-22: `--hook-submit` with no server running; the next call took 0.9 seconds). When the model is not cached yet, its download takes 2–10 minutes; the hooks wait at most 60 seconds and go on without the server ("PID file handling" above). This is an accepted behavior by design; the hooks' `"timeout": 120` (§4 "Hook time limit") covers the wait.
+- **First Start**: Because model preloading runs before uvicorn starts, every start of the server takes time, not only the first one. With the model already cached, a hook that had to start the server took 41.2 seconds on the development PC (2026-11-22: the prompt hook with no server running; the next call took 0.9 seconds). When the model is not cached yet, its download takes 2–10 minutes; the hooks wait at most 60 seconds and go on without the server ("PID file handling" above). This is an accepted behavior by design; the hooks' `"timeout": 120` (§4 "Hook time limit") covers the wait.
 
 ### SQLite Durability Settings
 Force the following on every connection:
@@ -539,7 +539,7 @@ proc = subprocess.Popen(
 
 **Safe import path (2026-11-21)**: `python -m <module>` puts the current folder first on `sys.path`. The hooks and the commands of §4 run in the folder the user has open in Codex. Without the two rules below, a file in that folder with the name of any module N3MC imports (for example `shlex.py` or `fastapi.py` in a repository the user has just cloned) is imported, and runs, inside N3MC.
 
-**Rule 1 — entry modules drop the current folder.** Every module of the package that can be the program's entry — the ones that end with `if __name__ == "__main__":`; here `n3memory.py`, `n3mc_hook.py` and `n3mc_stop_hook.py` — has the following block as its **first statements**, right after the docstring and before any other import (in the hook modules, the UTF-8 block comes after it):
+**Rule 1 — entry modules drop the current folder.** Every module of the package that can be the program's entry — the ones started with `python -m`; here `n3memory.py` — has the following block as its **first statements**, right after the docstring and before any other import. The hook entry `codex_entry.py` does not have it: its registered command starts Python with `-I` (§4), which keeps the current folder off `sys.path`:
 
 ```python
 import os as _os
@@ -583,11 +583,11 @@ def python_cmd():
     return cmd
 ```
 
-Every child Python process — the server in the code above and the calls of the hook modules — is started as `[*python_cmd(), '-m', …]`, never as `[sys.executable, '-m', …]`. `-P` (Python 3.11) keeps Python from adding the current folder at all, which also covers a folder there that has the name of this package.
+Every child Python process — the server in the code above — is started as `[*python_cmd(), '-m', …]`, never as `[sys.executable, '-m', …]`. `-P` (Python 3.11) keeps Python from adding the current folder at all, which also covers a folder there that has the name of this package.
 
 **What the rules do not cover**: a folder or file in the current folder with the name of this package itself (`n3memorycore`), when the program is entered by `python -m …` typed in that folder (the commands of §4, and a hook registered in the `python -m` form). The block is never reached, because the other package is the one that is imported. On Python 3.10 the same holds for the children (there is no `-P`), and a `runpy.py` in that folder runs as well. Entering through the console scripts, or with `python -P -m …` on Python 3.11 and later, avoids it. (Checked 2026-11-21: with `shlex.py` in the current folder, `python -m n3memorycore.n3memory` ran that file before these rules and does not run it with them; a folder `n3memorycore/` there still runs.)
 
-**Character Encoding (UTF-8)**: At the start of `main()` in `n3memorycore/n3memory.py`, **AND at module top of `n3memorycore/n3mc_hook.py` and `n3memorycore/n3mc_stop_hook.py`** (before any `sys.stdin.read()` or `subprocess.run` invocation), execute the following to resolve character corruption in Windows cp932 environments from within the program itself:
+**Character Encoding (UTF-8)**: At the start of `main()` in `n3memorycore/n3memory.py`, **AND in `n3memorycore/codex_entry.py` before stdin is read**, execute the following to resolve character corruption in Windows cp932 environments from within the program itself:
 
 ```python
 for _stream_name in ("stdin", "stdout", "stderr"):
@@ -602,7 +602,7 @@ for _stream_name in ("stdin", "stdout", "stderr"):
 - With this, the caller does not need to specify `python -X utf8`.
 - `reconfigure` is available from Python 3.7 onward. For older environments, use the `PYTHONUTF8=1` environment variable as an alternative.
 - All multilingual text (Japanese, English, Chinese, etc.) is unified as UTF-8.
-- ⚠️ **The reconfigure block is required in EVERY Python entry point that reads stdin or pipes stdin into a subprocess** — that includes `n3memorycore/n3memory.py`, `n3memorycore/n3mc_hook.py`, AND `n3memorycore/n3mc_stop_hook.py`. Forgetting it on any one of them silently mojibakes non-ASCII input on Windows (Japanese, em-dashes, etc.); the corrupted bytes are then persisted to `audit.log` and the DB and cannot be recovered. Run the block at module top in the hooks (not inside `main()`) so it precedes the first `sys.stdin.read()`.
+- ⚠️ **The reconfigure block is required in EVERY Python entry point that reads stdin or pipes stdin into a subprocess** — that includes `n3memorycore/n3memory.py` AND `n3memorycore/codex_entry.py`. Forgetting it on either of them silently mojibakes non-ASCII input on Windows (Japanese, em-dashes, etc.); the corrupted bytes are then persisted to `audit.log` and the DB and cannot be recovered. In the hook entry, run the block before stdin is read for the first time.
 
 **Path Portability**: All file path construction in Python code must use `os.path.join()` or `pathlib.Path`. Hardcoded path separator characters (`\` or `/` as string literals in path construction) are prohibited. The system must run on Windows and Linux without code changes.
 
@@ -653,7 +653,7 @@ Users edit `config.json` by hand (e.g. to tune `vector_min_cos`), so assume it m
 | `min_score`, `vector_min_cos`, `relative_min_score_ratio`, `version_sim_threshold`, `reply_sim_alpha`, `reply_sim_floor` | number | 0–1 |
 | `reply_sim_span` | number | > 0 |
 
-- "Integer" means a JSON integer (`2000`). A float such as `2000.0` is **not** accepted, even when its value is whole: these keys are used as slice bounds and counts (`user_text[:search_query_max_chars]`), and v1.4.0 accepted `2000.0`, after which every `--hook-submit` failed with `TypeError` before searching and the user message never reached the DB (it was only in `audit.log`). A negative `server_port` or `half_life_days: 0` also passed v1.4.0's check.
+- "Integer" means a JSON integer (`2000`). A float such as `2000.0` is **not** accepted, even when its value is whole: these keys are used as slice bounds and counts (`user_text[:search_query_max_chars]`), and v1.4.0 accepted `2000.0`, after which every prompt hook call failed with `TypeError` before searching and the user message never reached the DB (it was only in `audit.log`). A negative `server_port` or `half_life_days: 0` also passed v1.4.0's check.
 - Out-of-range values are treated exactly like wrongly typed ones: that key alone uses its default and the `config_type` notice names it.
 - **Why `search_result_limit` stops at 1365 (final review of 2026-11-18, C-06)**: the reference code's vector search asks sqlite-vec for `k = 3 × search_result_limit` neighbours, and sqlite-vec refuses a `k` above 4,096. With 1366 or more, every vector search returned nothing (sqlite-vec: "k value in knn query too large"; only a log warning) and the search went on with keyword hits only. 3 × 1365 = 4,095 is the largest value that works.
 
@@ -687,7 +687,7 @@ Bulk migrations inside `/repair` (vector re-indexing, FTS punctuation cleaning) 
 
 **No write lock while embedding (final review of 2026-11-18, F11)**: the vector repair computes the embeddings of the whole batch first, outside any transaction (an open one is committed before), and only then inserts the batch's `memories_vec` / `memories_fts` / `memories_fts_bi` rows and commits — the same order as `--reembed`. (Until then the first `INSERT … memories_vec` opened the write transaction, which stayed open while the rest of the batch — up to 200 records — was embedded; a `/buffer` that arrived meanwhile waited for the busy timeout and failed with `database is locked`, and so did its `_buffer_direct` fallback, so the prompt was not saved. Reproduced with 60 records and a stand-in model of 0.25 s per record.) **Check again before writing (2026-11-20)**: after the embeddings, take the write lock with `BEGIN IMMEDIATE`, and for each row of the batch check that the `memories` row still exists and is the same record (same `id` or `content`) and that `memories_fts` / `memories_fts_bi` / `memories_vec` still have no row for that rowid; write only what is missing. Rows another call (a hook in another window, a manual `--repair`) has filled meanwhile, and rows deleted meanwhile, are skipped. (Before, when two calls read the same unrepaired row, the later one stopped with `UNIQUE constraint failed on memories_vec primary key` (2026-11-20, reproduced in the review of N3MC Pro's generated code).)
 
-**Per-call limit for hooks (v1.5.0)**: `/repair` accepts an optional body `{"max_records": int}`. `--hook-submit` sends `{"max_records": 200}` (one batch), so a large backlog — e.g. many records saved through `_buffer_direct` while another folder's server held the port — is worked off a batch per turn instead of blocking one prompt for minutes. `n3mc --repair` sends no limit and processes everything. The one-time migrations (FTS punctuation cleaning, vector re-index) follow the same limit; their markers are written only when the migration has finished.
+**Per-call limit for hooks (v1.5.0)**: `/repair` accepts an optional body `{"max_records": int}`. The prompt hook sends `{"max_records": 200}` (one batch), so a large backlog — e.g. many records saved through `_buffer_direct` while another folder's server held the port — is worked off a batch per turn instead of blocking one prompt for minutes. `n3mc --repair` sends no limit and processes everything. The one-time migrations (FTS punctuation cleaning, vector re-index) follow the same limit; their markers are written only when the migration has finished.
 
 The **FTS punctuation cleaning** is the exception: processed rows do not drop out of its result set (they are only UPDATEd), so `OFFSET 0` would never finish. Page it with a keyset instead: `WHERE rowid > <last rowid of the previous batch> ORDER BY rowid LIMIT 200`. **Carry on where the last call stopped (2026-11-20)**: write the last rowid done to the `meta` key `fts_punct_cursor` in the same transaction as each batch's rewrites; the next call starts after it, not at rowid 0 (so calls with `max_records` keep moving on, also across restarts). When the last row has been read, write `fts_punct_cleaned` and delete `fts_punct_cursor`. (Before, every call with a limit started again at rowid 0, never reached row 201, and never wrote the marker (2026-11-20, reproduced in the review of N3MC Pro's generated code).)
 
@@ -791,8 +791,6 @@ Use the installed `n3mc` command or `python -I -m n3memorycore.n3memory` with th
 | `--show-turn TURN_ID` | Prints the complete turn and local timestamps to stdout. |
 | `--stop` | Cleans up expired markers and rotates the audit log. Server shutdown uses `POST /shutdown` in §3. |
 | `--run-server` | Runs the server in the foreground using `config.json`. Defaults to `127.0.0.1:18520`. |
-| `--hook-submit` | Legacy compatibility. Reads `prompt` or `message` from JSON on stdin and returns recalled Markdown. Codex uses `n3mc-hook` in §4. |
-| `--save-claude-turn` | Legacy compatibility. Saves `last_assistant_message` from JSON on stdin. Codex uses `n3mc-stop-hook` in §4. |
 | `--backup NEW_DIRECTORY` | Creates an online SQLite snapshot, config and checksummed manifest in a new directory. Returns JSON with `path` and `records`. |
 | `--restore-backup DIRECTORY --to-home NEW_DIRECTORY` | Verifies the backup hashes and DB, then restores to a new data home. Returns JSON with `path` and `records`. |
 | `--export-records NEW_FILE` | Writes text, provenance, lifecycle and index metadata as JSONL to a new file. Returns JSON with `path`. |
@@ -823,8 +821,8 @@ The CLI sends HTTP requests to the FastAPI server. All endpoints are issued to `
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | (internal health check) | Returns `{"status": "ok", "root", "code_version", "pid"}` (§3 "Server identity") |
 | `POST` | `/buffer` | `--buffer`, hooks | Body `{"content": str, "agent_name": str?, "local_id": str?, "session_id": str?, "turn_id": str?}` (omitted `local_id` → `config.json`; omitted `session_id` → the server's session, §3 "Identifiers"; the CLI sends `N3MC_SESSION_ID` when it is set). Saves |
-| `POST` | `/search` | `--search`, `--hook-submit` | Body `{"query": str, "session_id": str?, "since": str?, "until": str?}`. `since` / `until` are parsed with the same rules as the CLI (§3.6); an unreadable value returns 400. Returns results |
-| `POST` | `/repair` | `--repair`, `--hook-submit` | Body optional: `{"max_records": int?}` (§3.5 "Migration Batch Processing"). Repairs unindexed records |
+| `POST` | `/search` | `--search`, the prompt hook | Body `{"query": str, "session_id": str?, "since": str?, "until": str?}`. `since` / `until` are parsed with the same rules as the CLI (§3.6); an unreadable value returns 400. Returns results |
+| `POST` | `/repair` | `--repair`, the prompt hook | Body optional: `{"max_records": int?}` (§3.5 "Migration Batch Processing"). Repairs unindexed records |
 | `GET` | `/list` | (no CLI command) | Returns all records (each record includes `agent_name`). Kept for API clients; `--list`, `--recall-thread` and `--show-turn` read the DB directly and never call it |
 | `POST` | `/shutdown` | (internal, server replacement) | Body `{"root": str}`. Exits only when `root` equals its own `root`; otherwise 403 (§3) |
 | `DELETE` | `/delete/{id}` | — | **Pro only.** Free always returns 403 (`{"detail": "Pro feature"}`) |
@@ -1021,7 +1019,7 @@ n3mc-free/
     ├── test_dedup_concurrent.py # Layer 1: two saves of the same text for the same turn at once (R04; no model needed)
     ├── test_processor.py    # Layer 2: Ranking math, purify `[code omitted]` substitution, Refresh
     ├── test_api.py          # Layer 3: FastAPI endpoint tests (TestClient)
-    ├── test_hooks.py        # Layer 4: Hook integration (complete-preservation chunking, image strip, audit log)
+    ├── test_hooks.py        # Layer 4: Hook integration (complete-preservation chunking, audit log)
     ├── test_hooks_encoding.py # Regression tests for surrogate stripping and UTF-8
     ├── test_regressions.py  # Layer 5: Regression tests for the v1.4.0 – v1.6.0 fixes (no model needed)
     ├── test_search_port_2026_11_17.py # Layer 5: Japanese FTS grams, bigram index, skipped system inputs, reply re-rank
@@ -1029,9 +1027,9 @@ n3mc-free/
     └── test_index_meta.py             # Layer 5: meta table, model mismatch notice, --reembed (v1.8.0; no model needed)
 ```
 
-**Protect real data (mandatory)**: Put an autouse fixture in `conftest.py` that points `HOME_DIR`, `MEMORY_DIR`, `DB_PATH`, `PID_FILE`, `AUDIT_LOG`, `NOTICES_FILE`, `CONFIG_FILE`, `TURN_ID_FILE`, `SERVER_LOG` and the server-start marker of the `n3memory` module — **and the `AUDIT_LOG` of the hook modules** (`n3mc_hook`, `n3mc_stop_hook`) — to a temporary folder, point the user's `~/.Codex/settings.json` used by `--init` to a temporary file (e.g. by setting `HOME` / `USERPROFILE` for the test), and replaces `_request_shutdown` and the HTTP senders (`_post`, `_get`) with fakes that never reach a real server. Tests must never write to `notices.json` or `audit.log` in the real `~/.n3mc`, nor send `/shutdown` to the real server (18520).
+**Protect real data (mandatory)**: Put an autouse fixture in `conftest.py` that points `HOME_DIR`, `MEMORY_DIR`, `DB_PATH`, `PID_FILE`, `AUDIT_LOG`, `NOTICES_FILE`, `CONFIG_FILE`, `SERVER_LOG` and the server-start marker of the `n3memory` module to a temporary folder, points the `hooks.json` used by `--init` to a temporary file through `N3MC_CODEX_HOOKS_PATH`, and replaces `_request_shutdown` and the HTTP senders (`_post`, `_get`) with fakes that never reach a real server. Tests must never write to `notices.json` or `audit.log` in the real `~/.n3mc`, nor send `/shutdown` to the real server (18520).
 
-For Codex, point `N3MC_CODEX_HOOKS_PATH` at a temporary `hooks.json` and redirect `codex_entry.MEMORY_DIR` to a test directory. The older host’s test names and counts below describe regression coverage. Use `tests/test_codex_integration.py` for the active Codex entry points. If `test_safe_path.py` is absent, verify the installed command directly from a different working directory.
+For Codex, point `N3MC_CODEX_HOOKS_PATH` at a temporary `hooks.json` and redirect `codex_entry.MEMORY_DIR` to a test directory. The test names below describe regression coverage. Use `tests/test_codex_integration.py` for the active Codex entry points. If `test_safe_path.py` is absent, verify the installed command directly from a different working directory.
  **Replacing HOME also moves the Hugging Face cache, so `TestEmbedding` and the like would download the embedding model (about 470 MB) again into a temporary folder for every test.** Pin `HF_HOME` in the fixture to the real cache from before the replacement (the value of `HF_HOME` if it is set, otherwise `~/.cache/huggingface`).
 
 Standard fixture import style:
@@ -1089,13 +1087,11 @@ python -m pytest tests/ -v
 | `TestGC` | `gc_returns_403`, `gc_detail_is_pro` | Pro-only endpoint → 403 |
 | `TestImport` | `import_returns_403`, `import_with_data_returns_403`, `import_detail_is_pro` | Pro-only endpoint → 403 |
 
-### Layer 4: `test_hooks.py` (21 tests) and `test_hooks_encoding.py` (10 tests)
+### Layer 4: `test_hooks.py` (13 tests) and `test_hooks_encoding.py` (10 tests)
 
 | Test Class | Tests | Coverage |
 |---|---|---|
 | `TestChunkText` | `short_text_single_record`, `long_text_multiple_chunks`, `prefixes_numbered`, `single_chunk_no_number`, `paragraph_split`, `hard_window_fallback` | Complete-preservation chunking |
-| `TestStripImages` | `plain_text_unchanged`, `base64_image_stripped`, `image_only_payload_returns_empty` | Image payload stripping |
-| `TestExtractText` | `plain_string`, `multimodal_json_list`, `image_only_empty`, `empty_input`, `json_text_is_kept_as_typed` | Multimodal text extraction; typed text that is valid JSON is not read as a multimodal array |
 | `TestCompleteRecording` | `short_claude_response_saved`, `short_user_message_saved`, `skip_pattern_abolished`, `code_block_replaced_in_purify`, `inline_code_preserved_in_purify` | Complete-Recording Contract (filters removed) |
 | `TestStopIdempotency` | Codex Stop | Verify that repeat Codex Stop events preserve project `AGENTS.md` and do not duplicate saved records. |
 | `TestSanitizerUnit` | `strips_lone_high_surrogate`, `strips_lone_low_surrogate`, `clean_japanese_unchanged`, `complete_emoji_pair_preserved`, `recursive_dict`, `recursive_list`, `none_passthrough` | Surrogate stripping (`test_hooks_encoding.py`) |
@@ -1113,19 +1109,19 @@ Embeddings are replaced with deterministic fake vectors built from `zlib.crc32` 
 | `TestFtsQuoting` | Queries containing `\ / # = @ * $ %`, `AND/OR/NOT`, `"`, or control characters do not raise; terms containing symbols are hit; `hybrid_search` continues when `search_fts` raises. **v1.5.0**: terms are joined with `OR` (a sentence-like query hits a record that contains only some of its words); terms under 3 characters (`AI`, `東京`) are dropped and a query of only such terms skips FTS; punctuation in the query splits terms (`「アルファ9」の気温は？` hits `架空の惑星「アルファ9」の気温設定`). **2026-11-17**: at most 40 terms; CJK words of 4+ characters become 3-character grams |
 | `test_search_port_2026_11_17.py` (2026-11-17) | A Japanese sentence without spaces hits a record containing its words; hiragana-only grams are dropped; symbol-only and 2-character queries do not raise; `bigram_text('N3MCの設定')` is `N3MC の設 設定`; `記憶` and `PR` hit through the bigram index (and through `hybrid_search`); a failing bigram search keeps the trigram results; `delete_memory` leaves no bigram row; `--repair` fills the bigram rows of an old DB once (two runs, one row per record); `<agent-message from=...>` and `<system-reminder>` prompts are neither saved nor searched and keep `turn_id`, while a user question starting with `<agent-message` or `<div>` is not skipped; the reply re-rank is off by default, moves the exchange with the closer reply up when on, and returns its input on a DB error |
 | `test_index_meta.py` (v1.8.0) | (2026-11-22) with `memories_vec` recreated as `float[384]` and the three `meta` rows deleted, `--reembed` with a 384-dimensional stand-in model succeeds, the vector count equals the record count and `embed_dim` is 384; a model whose dimension really differs changes nothing and exits 1; `init_db` creates `meta`; `/repair` writes `fts_punct_cleaned` / `fts_bigram` / `embed_model` / `embed_dim`; a restored older database (no `meta` keys) next to v1.7.0 marker files gets its bigram index filled; `embed_model` comes from `vec_model.txt` only when vectors exist; a mismatch emits `embed_model_mismatch` and a match clears it; `--reembed` replaces every vector with the configured model's, writes `embed_model`, clears the notice, resumes from `reembed_cursor`, and refuses a model of another dimension without changing anything |
-| `test_review_2026_11_17.py` (2026-11-17) | No chunk is longer than `max_chars` (paragraph and sentence paths, `max_chars` 400 and small values, Japanese text); `chunk_text('x' * 10 + '\n\n' + 'y' * 400)` keeps all 410 letters and returns chunks of at most 400; `is_own_hook` recognizes `C:\Tools\n3mc-hook.exe` and `C:\Tools\n3mc-stop-hook.exe` written with backslashes and no quotes, and `--init` then replaces such an entry instead of adding a second one |
+| `test_review_2026_11_17.py` (2026-11-17) | No chunk is longer than `max_chars` (paragraph and sentence paths, `max_chars` 400 and small values, Japanese text); `chunk_text('x' * 10 + '\n\n' + 'y' * 400)` keeps all 410 letters and returns chunks of at most 400 |
+ |
 | `TestVectorFilter` | A search with `since` returns in-range records even if they are outside the global KNN top; falls back to exact computation when `rowid IN` is unavailable |
 | `TestNoSimilarityDedup` | Similar chunks (cos ≥ 0.95) are all saved; exact matches within the same `turn_id` are skipped; exact matches in a different `turn_id` are saved; without `turn_id`, exact matches are skipped globally |
 | `TestSearchShaping` | Candidates below `vector_min_cos` are discarded; relative cutoff; `_version_group` rows survive the cutoff; the newer version comes first; identical content is collapsed; `pair_top_n`, `pair_max_chars`, and `pairs_omitted`. **v1.5.0**: a 30-day-old record from another session with high similarity survives the relative cutoff while a current-session record with lower similarity is present; a keyword-only hit from another session survives `min_score`; the order is still by the final score (current session first). **v1.6.0**: a 400-day-old record with high similarity is returned even when it is the only candidate (`min_score` and the relative cutoff ignore `time_decay`); when a new and a 400-day-old record with the same similarity are both present, both are returned and the new one comes first |
 | `TestRender` | `saved=` is local time; the versions sentence; the omission line contains `--show-turn`; notices appear at the top. **v1.6.0**: weak rows appear under `## Possibly related (weak matches — may be unrelated)` after Top matches and before the Q-A exchanges, numbered on from Top matches; with no top matches, `_No relevant memories found._` is followed by the weak-matches heading (rows from `[1]`); no weak heading when there are no weak rows |
 | `TestNoContextFile` | Verify that `--search` creates no `memory_context.md` and Codex Stop leaves project instructions intact. |
-| `TestBehaviorMd` | Leaves the file alone when the marker matches; backs up and replaces a previous template (**v1.6.0**: including the `v2` template, hash `5af3c015c06c62c1`; the new file starts with `<!-- n3mc-behavior v3 -->` and contains the Weak Matches section); does not replace a hand-edited file and emits a notice. **v1.5.0**: the notice key contains a hash of the path and the message contains the path; two hand-edited files give two notices; the notice is cleared when the file's first line becomes the current marker |
 | `TestServerDecision` | Healthy / different `code_version` / another folder / no `root` and unverifiable; uses `/shutdown` first; 403 when `root` differs; does not wait on a dead PID file; **2026-11-20**: when the PID-file server listens on another port whose `/health` reports this folder, `/shutdown` goes to that port and a new server starts without the 60-second wait; a port reporting another `root` gets no `/shutdown`; the `Host` check uses the port the server listens on, not the current `config.json` |
 | `TestServerStart` (v1.5.0) | A child that exits during the wait stops the wait at once and emits `server_start_failed` naming `server.log`; within 5 minutes of a failure no new start is attempted; a later successful start clears the notice and the marker; a PID-file process still starting after 60 s is neither replaced nor duplicated; `Popen` gets the detach flags for the platform and stderr goes to `server.log` (process creation replaced by a fake); (2026-11-22) two `ensure_server` calls started together with no PID file and no server call `Popen` once; when the reserving call's `Popen` raises, the reservation is removed and a later call can start the server; the call that lost never rewrites the PID file; an empty PID file younger than 60 s counts as starting |
-| `TestServerApi` (v1.5.0) | A request with `Host: evil.example` gets 403 on every endpoint, `127.0.0.1:<port>` and `localhost:<port>` pass; `/buffer`, `/search`, `/repair`, `/list` are plain `def` functions; `/repair` with `{"max_records": 200}` processes at most 200 records and `--hook-submit` sends that limit; with `HTTP_PROXY` pointing to another local server, `_get` still reaches the N3MC server and nothing reaches the proxy (F16). **v1.9.1**: a request with `Origin: http://evil.example`, and one with `Origin: null`, gets 403 on every endpoint even with `Host: 127.0.0.1:<port>`; the same request without `Origin` passes; the requests `_post` and `_get` send carry no `Origin` header |
+| `TestServerApi` (v1.5.0) | A request with `Host: evil.example` gets 403 on every endpoint, `127.0.0.1:<port>` and `localhost:<port>` pass; `/buffer`, `/search`, `/repair`, `/list` are plain `def` functions; `/repair` with `{"max_records": 200}` processes at most 200 records (`test_codex_integration.py` checks that the prompt hook sends that limit); with `HTTP_PROXY` pointing to another local server, `_get` still reaches the N3MC server and nothing reaches the proxy (F16). **v1.9.1**: a request with `Origin: http://evil.example`, and one with `Origin: null`, gets 403 on every endpoint even with `Host: 127.0.0.1:<port>`; the same request without `Origin` passes; the requests `_post` and `_get` send carry no `Origin` header |
 | `TestForeignServer` | With another folder's server on the port: saves go directly to our own DB, no search, `--repair` does nothing |
 | `TestConfig` | Does not overwrite an unreadable `config.json`; ignores only the mistyped key; notices clear once fixed; `code_version` changes only when the contents of `config.json` change. **v1.5.0**: `2000.0` for `search_query_max_chars`, `0` for `half_life_days`, `70000` / `-1` for `server_port`, `1.5` for `min_score` are ignored with `config_type` (**v1.6.0**: so are `-1` and `1.5` for `min_results`, while `0` is accepted; **C-06**: `1366` for `search_result_limit` is ignored with `config_type`, while `1365` is accepted and a vector search with `k = 4095` works); a missing file is created with exclusive creation and a concurrent creator's file is read, not overwritten (one `owner_id`); updates go through a temporary file and `os.replace`; (2026-11-22) two processes started together on an existing `config.json` without IDs (empty DB) both end with the `owner_id` / `local_id` on disk and the user's own keys are kept; the server's `code_version` equals the client's when nothing changed (also after a fill-in write), and a change of `config.json` right after the server read it makes the server `stale` and, after the restart, `ok` with the new settings |
-| `TestHookSubmit` | Verify that the Codex adapter excludes system input, saves with `session_id` and `turn_id`, and does not read transcripts. The compatibility CLI has separate transcript coverage. |
+| `test_codex_integration.py`, `TestSystemInputsSkipped` | Verify that the Codex adapter excludes system input, saves with `session_id` and `turn_id`, and does not read transcripts. |
 | `TestPurifyBeforeChunk` (v1.5.0) | A user message over 500 characters with two code blocks and prose between them keeps the prose and stores neither code block; a code block longer than 400 characters is replaced, not stored |
 | `TestChunkSentences` (v1.5.0) | Japanese text without blank lines is split after `。` / `！` / `？`, not mid-sentence |
 | `TestTimeBounds` (v1.5.0) | A date-only `--since` is local midnight converted to UTC (with a fixed non-UTC time zone); an offset value is honoured; `T` and space separators give the same bound; `yesterday` exits with status 2 and an error line; `since > until` is an error |

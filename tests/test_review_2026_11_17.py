@@ -11,10 +11,8 @@ import os
 
 import pytest
 
-from n3memorycore import n3memory
 from n3memorycore.core.processor import chunk_text
 
-from tests.test_regressions import REAL_SETTINGS_PATH
 
 
 def letters(chunks):
@@ -54,22 +52,6 @@ class TestChunkLengthBound:
         text = '\n\n'.join(['a' * 300, 'b' * 150])
         chunks = chunk_text(text)
         assert chunks == ['a' * 300, 'a' * 40 + '\n\n' + 'b' * 150]
-
-
-class TestOwnHookBackslash:
-    @pytest.mark.parametrize('cmd,event', [
-        (r'C:\Tools\n3mc-hook.exe', 'UserPromptSubmit'),
-        (r'C:\Tools\n3mc-stop-hook.exe', 'Stop'),
-        (r'C:\Python312\python.exe -m n3memorycore.n3mc_hook', 'UserPromptSubmit'),
-    ])
-    def test_recognized(self, cmd, event):
-        assert n3memory.is_own_hook(cmd, event)
-
-    def test_others_not_recognized(self):
-        assert not n3memory.is_own_hook(r'C:\Tools\other-hook.exe', 'UserPromptSubmit')
-        assert not n3memory.is_own_hook(r'C:\Tools\n3mc-hook.exe', 'Stop')
-        assert not n3memory.is_own_hook(
-            r'python C:\N3MC-Pro_X\N3MemoryCore\n3mc_hook.py', 'UserPromptSubmit')
 
 
 class TestCodexInit:

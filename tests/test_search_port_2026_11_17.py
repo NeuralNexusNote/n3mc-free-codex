@@ -8,13 +8,11 @@
 No embedding model: vectors are fixed fakes. Real data and real servers are
 never touched (conftest._isolate_real_data).
 """
-import io
-import json
 import os
 
 import pytest
 
-from n3memorycore import n3memory
+from n3memorycore import codex_entry, n3memory
 from n3memorycore.core import database as db
 from n3memorycore.core import processor as proc
 
@@ -151,16 +149,16 @@ class TestSystemInputsSkipped:
         '<agent-message from="worker-1">done</agent-message>',
         '<system-reminder>\nThe user is away.\n</system-reminder>',
     ])
-    def test_not_saved_not_searched(self, monkeypatch, capsys, prompt):
+    def test_not_saved_not_searched(self, monkeypatch, prompt):
         def no_server(c):
             raise AssertionError('ensure_server must not be called')
+        monkeypatch.setattr(codex_entry, 'MEMORY_DIR', n3memory.MEMORY_DIR)
         monkeypatch.setattr(n3memory, 'ensure_server', no_server)
-        n3memory._write_turn_id('keep-me', 'sess')
-        payload = {'prompt': prompt, 'session_id': 'sess'}
-        monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps(payload)))
-        n3memory.cmd_hook_submit({'server_port': 1, 'search_query_max_chars': 2000})
-        assert n3memory._read_turn_id('sess') == 'keep-me'
-        assert '_No relevant memories found._' in capsys.readouterr().out
+        payload = {'prompt': prompt, 'session_id': 'sess', 'turn_id': 'turn'}
+        assert codex_entry._handle('--prompt', payload) is None
+        # the reply of the same turn is not saved either
+        assert codex_entry._handle('--stop', {'session_id': 'sess', 'turn_id': 'turn',
+                                              'last_assistant_message': 'ok'}) is None
         assert not os.path.exists(n3memory.DB_PATH)
 
     def test_user_text_starting_with_tag_is_kept(self):

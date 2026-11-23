@@ -3,7 +3,6 @@
 No embedding model: vectors are deterministic fakes. Real data and real
 servers are never touched (conftest._isolate_real_data).
 """
-import io
 import json
 import math
 import os
@@ -16,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from n3memorycore import n3memory
+from n3memorycore import codex_entry, n3memory
 from n3memorycore.core import database as db
 from n3memorycore.core import processor as proc
 
@@ -373,17 +372,12 @@ class TestRender:
         assert md.index('N3MC notice: port conflict') < md.index('## Top matches')
 
 
-# --------------------------------------------------------------------------- memory_context retirement
+# --------------------------------------------------------------------------- --stop leaves project files alone
 def stop_in(tmp_path, monkeypatch):
+    """Run from a project folder that has files of another host's tooling."""
     claude_dir = tmp_path / 'proj' / '.claude'
     (claude_dir / 'rules').mkdir(parents=True)
-    paths = {
-        'CLAUDE_DIR':  str(claude_dir),
-        'CLAUDE_MD':   str(claude_dir / 'CLAUDE.md'),
-        'RULES_DIR':   str(claude_dir / 'rules'),
-        'BEHAVIOR_MD': str(claude_dir / 'rules' / 'n3mc-behavior.md'),
-    }
-    monkeypatch.setattr(n3memory, 'claude_paths', lambda cwd=None: paths)
+    monkeypatch.chdir(tmp_path / 'proj')
     return claude_dir
 
 
@@ -394,25 +388,7 @@ class TestNoContextFile:
                             lambda *a, **k: {'results': [], 'pairs': {}, 'pairs_omitted': {}})
         n3memory.cmd_search('hello', {'server_port': 1})
         assert '# Recalled Memory Context' in capsys.readouterr().out
-        assert not os.path.exists(n3memory.CONTEXT_FILE)
-
-    def test_stop_removes_import_keeps_crlf(self, tmp_path, monkeypatch):
-        claude_dir = stop_in(tmp_path, monkeypatch)
-        # v1.5.0: only this installation's own CONTEXT_FILE (a path with a space)
-        own = tmp_path / 'my user' / '.n3mc' / '.memory' / 'memory_context.md'
-        monkeypatch.setattr(n3memory, 'CONTEXT_FILE', str(own))
-        md = claude_dir / 'CLAUDE.md'
-        original = ('# CLAUDE.md\r\n\r\nMy rules\r\n\r\n'
-                    '# N3MemoryCore — recalled context for the current turn\r\n'
-                    '@' + own.as_posix() + '\r\n')
-        md.write_bytes(original.encode('utf-8'))
-        n3memory._retire_memory_context(str(md))
-        data = md.read_bytes().decode('utf-8')
-        assert 'memory_context' not in data
-        assert 'My rules' in data
-        assert '\r\n' in data and '\n' not in data.replace('\r\n', '')
-        backups = [p for p in os.listdir(claude_dir) if p.startswith('CLAUDE.md.bak-n3mc-')]
-        assert len(backups) == 1
+        assert not os.path.exists(os.path.join(n3memory.MEMORY_DIR, 'memory_context.md'))
 
     def test_stop_leaves_clean_file_alone(self, tmp_path, monkeypatch):
         claude_dir = stop_in(tmp_path, monkeypatch)
@@ -427,49 +403,6 @@ class TestNoContextFile:
         n3memory.cmd_stop({})
         assert not (claude_dir / 'CLAUDE.md').exists()
 
-    def test_leftover_file_deleted_once(self, tmp_path, monkeypatch):
-        stop_in(tmp_path, monkeypatch)
-        with open(n3memory.CONTEXT_FILE, 'w', encoding='utf-8') as f:
-            f.write('old')
-        n3memory._retire_memory_context(n3memory.claude_paths()['CLAUDE_MD'])
-        assert not os.path.exists(n3memory.CONTEXT_FILE)
-        assert os.path.exists(n3memory.CONTEXT_RETIRED_MARKER)
-
-
-# --------------------------------------------------------------------------- behavior md
-OLD_TEMPLATE_V1 = """# N3MemoryCore Behavioral Guidelines
-
-These guidelines apply to every Claude Code session in this project. They are
-loaded automatically from `.claude/rules/` at session start.
-
-## Fully Automatic Saving
-All conversations are saved by hooks (UserPromptSubmit + Stop). Do NOT call
-`--buffer` manually. Every non-empty user message and Claude response is
-recorded character-for-character; there is no length filter and no skip-pattern
-filter. Make NO acknowledgement when a save succeeds — silence is correct.
-
-## Active RAG
-When prior context would help, run a search proactively. **Always invoke via
-`python -m n3memorycore.n3memory --search "<keywords>"`**, NOT the bare `n3mc`
-console script. Claude Code spawns a bash subprocess whose `PATH` does not
-reliably include the Python `Scripts/` directory where the `n3mc` entry-point
-lives, so `n3mc --search ...` works in interactive shells but fails in
-production with `command not found`. `python -m` resolves through the Python
-interpreter (which is on `PATH`) and is portable across venvs and platforms.
-Both invocation forms are auto-allowed via `permissions.allow`.
-
-## Recall Acknowledgment
-When `--search` results actually shape your reply (you are recalling something
-saved earlier), open the reply with a short acknowledgment in the user's
-language — e.g. "Pulling this from earlier memory in this session." or
-「前回の回答がメモリに保存されています。」 If no relevant memory was found,
-or it did not influence your answer, do NOT announce anything.
-
-## Fatal-Failure Warning
-If a save fails physically, surface the warning prominently:
-> ⚠️ Physical save failed. Current memories may be lost.
-"""
-
 
 def notices():
     try:
@@ -477,37 +410,6 @@ def notices():
             return json.load(f)
     except FileNotFoundError:
         return {}
-
-
-class TestBehaviorMd:
-    def test_old_template_hash_is_known(self):
-        assert n3memory._behavior_md_hash(OLD_TEMPLATE_V1) in n3memory._KNOWN_BEHAVIOR_MD_HASHES
-
-    def test_known_old_template_replaced_with_backup(self, tmp_path, monkeypatch):
-        claude_dir = stop_in(tmp_path, monkeypatch)
-        rule = claude_dir / 'rules' / 'n3mc-behavior.md'
-        rule.write_bytes(OLD_TEMPLATE_V1.replace('\n', '\r\n').encode('utf-8'))
-        n3memory._ensure_behavior_md(str(rule))
-        text = rule.read_text(encoding='utf-8')
-        assert text.splitlines()[0].strip() == n3memory._BEHAVIOR_MD_MARKER
-        assert 'Cut Exchanges' in text and '--show-turn' in text
-        assert [p for p in os.listdir(rule.parent) if '.bak-n3mc-' in p]
-
-    def test_current_marker_untouched(self, tmp_path, monkeypatch):
-        claude_dir = stop_in(tmp_path, monkeypatch)
-        rule = claude_dir / 'rules' / 'n3mc-behavior.md'
-        rule.write_text(n3memory._BEHAVIOR_MD_MARKER + '\n# customised\n', encoding='utf-8')
-        n3memory._ensure_behavior_md(str(rule))
-        assert '# customised' in rule.read_text(encoding='utf-8')
-
-    def test_hand_edited_not_replaced_and_notified(self, tmp_path, monkeypatch):
-        claude_dir = stop_in(tmp_path, monkeypatch)
-        rule = claude_dir / 'rules' / 'n3mc-behavior.md'
-        rule.write_text(OLD_TEMPLATE_V1 + '\n## My own section\n', encoding='utf-8')
-        n3memory._ensure_behavior_md(str(rule))
-        assert '## My own section' in rule.read_text(encoding='utf-8')
-        keys = [k for k in notices() if k.startswith('behavior_md_edited')]
-        assert keys == [n3memory._behavior_notice_key(str(rule))]
 
 
 # --------------------------------------------------------------------------- config
@@ -569,33 +471,6 @@ class TestConfig:
 
 
 # --------------------------------------------------------------------------- hooks
-class TestHookSubmit:
-    def test_task_notification_skipped(self, monkeypatch, capsys):
-        def no_server(c):
-            raise AssertionError('ensure_server must not be called')
-        monkeypatch.setattr(n3memory, 'ensure_server', no_server)
-        n3memory._write_turn_id('keep-me', 'sess')
-        payload = {'prompt': '<task-notification>done</task-notification>', 'session_id': 'sess'}
-        monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps(payload)))
-        n3memory.cmd_hook_submit({'server_port': 1, 'search_query_max_chars': 2000})
-        assert n3memory._read_turn_id('sess') == 'keep-me'
-        assert '# Recalled Memory Context' in capsys.readouterr().out
-        with open(n3memory.AUDIT_LOG, encoding='utf-8') as f:
-            lines = [json.loads(l) for l in f]
-        assert any(l.get('stage') == 'skipped' for l in lines)
-        assert not os.path.exists(n3memory.DB_PATH)
-
-    def test_stop_keeps_turn_id(self, monkeypatch):
-        saved = []
-        monkeypatch.setattr(n3memory, 'ensure_server', lambda c: True)
-        monkeypatch.setattr(n3memory, '_do_buffer',
-                            lambda text, c, **k: saved.append((text, k.get('turn_id'))))
-        n3memory._write_turn_id('t-1', 'sess')
-        payload = {'last_assistant_message': 'answer', 'session_id': 'sess'}
-        monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps(payload)))
-        n3memory.cmd_save_claude_turn({'server_port': 1})
-        assert saved == [('[claude] answer', 't-1')]
-        assert n3memory._read_turn_id('sess') == 't-1'
 
 
 # --------------------------------------------------------------------------- server decision
@@ -703,17 +578,8 @@ class TestForeignServer:
 # References captured at import time (before conftest replaces them per test).
 REAL_SPAWN_SERVER = n3memory._spawn_server
 REAL_CHECK_HOST = n3memory._check_host
-REAL_SETTINGS_PATH = n3memory._settings_path
 REAL_POST = n3memory._post
 REAL_GET = n3memory._get
-
-
-def audit_lines():
-    try:
-        with open(n3memory.AUDIT_LOG, encoding='utf-8') as f:
-            return [json.loads(l) for l in f if l.strip()]
-    except FileNotFoundError:
-        return []
 
 
 # --------------------------------------------------------------------------- FTS (v1.5.0)
@@ -791,65 +657,6 @@ class TestSearchShaping(TestSearchShaping):  # v1.5.0 additions
         res = out['results']
         assert res[0]['turn_id'] == 'new'
         assert res[0]['filter_score'] >= res[1]['filter_score']
-
-
-# --------------------------------------------------------------------------- @import retirement (v1.5.0)
-class TestNoContextFile(TestNoContextFile):  # v1.5.0 additions
-    def _run(self, tmp_path, monkeypatch, lines):
-        claude_dir = stop_in(tmp_path, monkeypatch)
-        own = tmp_path / 'home' / '.n3mc' / '.memory' / 'memory_context.md'
-        monkeypatch.setattr(n3memory, 'CONTEXT_FILE', str(own))
-        md = claude_dir / 'CLAUDE.md'
-        md.write_text('\n'.join(lines(own)) + '\n', encoding='utf-8')
-        n3memory._retire_memory_context(str(md))
-        return md.read_text(encoding='utf-8'), claude_dir
-
-    def test_foreign_lines_kept(self, tmp_path, monkeypatch):
-        keep = ['@../.memory/memory_context.md',
-                '@C:/other/.memory/memory_context.md',
-                '@docs/notes_about_memory_context.md']
-        text, claude_dir = self._run(tmp_path, monkeypatch, lambda own: ['# Mine'] + keep)
-        for line in keep:
-            assert line in text
-        assert not [p for p in os.listdir(claude_dir) if '.bak-n3mc-' in p]
-
-    def test_backslash_form_of_own_path_removed(self, tmp_path, monkeypatch):
-        text, _ = self._run(
-            tmp_path, monkeypatch,
-            lambda own: ['# Mine', '@' + str(own).replace('/', '\\'),
-                         '@../.memory/memory_context.md'])
-        assert '# Mine' in text
-        assert '@../.memory/memory_context.md' in text
-        assert str(tmp_path).replace('/', '\\') not in text
-
-
-# --------------------------------------------------------------------------- behavior md (v1.5.0)
-class TestBehaviorMd(TestBehaviorMd):  # v1.5.0 additions
-    def test_two_files_two_notices_with_paths(self, tmp_path):
-        paths = []
-        for name in ('a', 'b'):
-            rule = tmp_path / name / '.claude' / 'rules' / 'n3mc-behavior.md'
-            rule.parent.mkdir(parents=True)
-            rule.write_text('# my own rules\n', encoding='utf-8')
-            n3memory._ensure_behavior_md(str(rule))
-            paths.append(rule)
-        ns = notices()
-        for rule in paths:
-            key = n3memory._behavior_notice_key(str(rule))
-            assert key in ns
-            assert len(key) == len('behavior_md_edited:') + 12
-            assert os.path.abspath(str(rule)) in ns[key]['message']
-
-    def test_notice_cleared_when_marker_present(self, tmp_path):
-        rule = tmp_path / '.claude' / 'rules' / 'n3mc-behavior.md'
-        rule.parent.mkdir(parents=True)
-        rule.write_text('# my own rules\n', encoding='utf-8')
-        n3memory._ensure_behavior_md(str(rule))
-        key = n3memory._behavior_notice_key(str(rule))
-        assert key in notices()
-        rule.write_text(n3memory._BEHAVIOR_MD_MARKER + '\n# merged\n', encoding='utf-8')
-        n3memory._ensure_behavior_md(str(rule))
-        assert key not in notices()
 
 
 # --------------------------------------------------------------------------- server start (v1.5.0)
@@ -1030,18 +837,6 @@ class TestServerApi:
                    headers={'Host': f'127.0.0.1:{self.PORT}'})
         assert r.status_code == 400
 
-    def test_hook_submit_sends_repair_limit(self, monkeypatch):
-        sent = []
-
-        def fake_post(c, p, payload, *a, **k):
-            sent.append((p, payload))
-            return ({'results': [], 'pairs': {}, 'pairs_omitted': {}} if p == '/search'
-                    else {'status': 'ok', 'count': 1})
-        monkeypatch.setattr(n3memory, 'ensure_server', lambda c: True)
-        monkeypatch.setattr(n3memory, '_post', fake_post)
-        monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps({'prompt': 'hello there'})))
-        n3memory.cmd_hook_submit({'server_port': 1, 'search_query_max_chars': 2000})
-        assert ('/repair', {'max_records': 200}) in sent
 
     def test_cli_sends_local_host_header(self, monkeypatch):
         import urllib.request
@@ -1133,192 +928,19 @@ class TestConfig(TestConfig):  # v1.5.0 additions
         assert n3memory.NOTICES_FILE in replaced
 
 
-# --------------------------------------------------------------------------- transcript (v1.5.0)
-def tline(typ, content, sidechain=False):
-    return json.dumps({'type': typ, 'isSidechain': sidechain,
-                       'message': {'role': typ, 'content': content}})
-
-
-def write_transcript(tmp_path, with_current=True):
-    lines = [
-        tline('user', 'first question'),
-        tline('assistant', [{'type': 'thinking', 'thinking': 'hidden thoughts'}]),
-        tline('assistant', [{'type': 'text', 'text': 'Let me check.'},
-                            {'type': 'tool_use', 'id': 't1', 'name': 'Read', 'input': {}}]),
-        tline('user', [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'file body'}]),
-        tline('assistant', [{'type': 'text', 'text': 'SIDECHAIN TEXT'}], sidechain=True),
-        'not json at all',
-        json.dumps({'type': 'system', 'content': 'meta'}),
-        tline('assistant', [{'type': 'text', 'text': 'Final answer here.'}]),
-    ]
-    if with_current:
-        lines.append(tline('user', [{'type': 'text', 'text': 'second question'}]))
-    p = tmp_path / 'session.jsonl'
-    p.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    return str(p)
-
-
-# Only the LAST text block — the same text Stop receives as last_assistant_message.
-EXPECTED_PREV = 'Final answer here.'
-
-
-class TestHookSubmit(TestHookSubmit):  # v1.5.0 additions
-    @pytest.mark.parametrize('with_current', [True, False])
-    def test_reads_previous_response(self, tmp_path, with_current):
-        p = write_transcript(tmp_path, with_current)
-        assert n3memory._read_previous_response(p, 'second question') == EXPECTED_PREV
-
-    def test_interrupted_reply_is_found(self, tmp_path):
-        """An interruption marker, meta lines and slash-command lines between
-        the partial reply and the new prompt are not prompts (spec §4.5 D3)."""
-        lines = [
-            tline('user', 'first question'),
-            tline('assistant', [{'type': 'text', 'text': 'Partial reply before the interrupt.'}]),
-            tline('user', [{'type': 'text', 'text': '[Request interrupted by user]'}]),
-            json.dumps({'type': 'user', 'isMeta': True, 'isSidechain': False,
-                        'message': {'role': 'user', 'content': 'caveat text'}}),
-            tline('user', '<command-name>/model</command-name>'),
-            tline('user', '<local-command-stdout>Set model</local-command-stdout>'),
-            tline('user', 'second question'),
-        ]
-        p = tmp_path / 'interrupted.jsonl'
-        p.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-        assert n3memory._read_previous_response(str(p), 'second question') == \
-            'Partial reply before the interrupt.'
-
-    def test_no_previous_reply_returns_empty(self, tmp_path):
-        p = tmp_path / 'fresh.jsonl'
-        p.write_text(tline('user', 'only question') + '\n', encoding='utf-8')
-        assert n3memory._read_previous_response(str(p), 'only question') == ''
-
-    def test_last_text_part_of_the_line(self, tmp_path):
-        p = tmp_path / 'multi.jsonl'
-        p.write_text('\n'.join([
-            tline('user', 'q1'),
-            tline('assistant', [{'type': 'text', 'text': 'part one'},
-                                {'type': 'text', 'text': 'part two'}]),
-            tline('user', 'q2'),
-        ]) + '\n', encoding='utf-8')
-        assert n3memory._read_previous_response(str(p), 'q2') == 'part two'
-
-    @pytest.mark.parametrize('with_current', [True, False])
-    def test_resent_interrupted_prompt_skips_only_trailing_line(self, tmp_path,
-                                                                with_current):
-        """spec §4.5 step 3 (C-05): the user interrupts 'q2' before any reply
-        text and sends 'q2' again. Only the trailing line is the current prompt;
-        the older 'q2' ends the walk, so the reply to 'q1' is not returned (it
-        would be saved again under the interrupted exchange's turn_id)."""
-        lines = [
-            tline('user', 'q1'),
-            tline('assistant', [{'type': 'text', 'text': 'answer to q1'}]),
-            tline('user', 'q2'),
-            tline('user', [{'type': 'text', 'text': '[Request interrupted by user]'}]),
-        ]
-        if with_current:
-            lines.append(tline('user', 'q2'))
-        p = tmp_path / 'resent.jsonl'
-        p.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-        assert n3memory._read_previous_response(str(p), 'q2') == ''
-
-    def test_resent_prompt_after_partial_reply(self, tmp_path):
-        """The interrupted exchange has reply text: that text is returned."""
-        p = tmp_path / 'partial.jsonl'
-        p.write_text('\n'.join([
-            tline('user', 'q1'),
-            tline('assistant', [{'type': 'text', 'text': 'answer to q1'}]),
-            tline('user', 'q2'),
-            tline('assistant', [{'type': 'text', 'text': 'partial answer to q2'}]),
-            tline('user', [{'type': 'text', 'text': '[Request interrupted by user]'}]),
-            tline('user', 'q2'),
-        ]) + '\n', encoding='utf-8')
-        assert n3memory._read_previous_response(str(p), 'q2') == 'partial answer to q2'
-
-    def run_hook(self, monkeypatch, payload, saved=None):
-        monkeypatch.setattr(n3memory, 'ensure_server', lambda c: True)
-
-        def fake_post(c, p, *a, **k):
-            return {'results': [], 'pairs': {}, 'pairs_omitted': {}} if p == '/search' else {}
-        monkeypatch.setattr(n3memory, '_post', fake_post)
-        if saved is not None:
-            monkeypatch.setattr(n3memory, '_do_buffer',
-                                lambda text, c, **k: saved.append((text, k.get('turn_id'))))
-        monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps(payload)))
-        n3memory.cmd_hook_submit({'server_port': 1, 'search_query_max_chars': 2000,
-                                  'owner_id': 'o'})
-
-    def test_saved_under_previous_turn_id(self, tmp_path, monkeypatch, capsys):
-        n3memory._write_turn_id('t-prev', 'sess')
-        saved = []
-        self.run_hook(monkeypatch, {'session_id': 'sess', 'prompt': 'second question',
-                                    'transcript_path': write_transcript(tmp_path)}, saved)
-        assert saved[0] == ('[claude] ' + EXPECTED_PREV, 't-prev')
-        assert saved[1][0] == '[user] second question'
-        assert saved[1][1] not in (None, 't-prev')
-        assert n3memory._read_turn_id('sess') == saved[1][1]
-        assert '# Recalled Memory Context' in capsys.readouterr().out
-
-    def test_supplied_last_assistant_message_wins(self, tmp_path, monkeypatch):
-        n3memory._write_turn_id('t-prev', 'sess')
-        saved = []
-        self.run_hook(monkeypatch, {'session_id': 'sess', 'prompt': 'q2',
-                                    'last_assistant_message': 'given reply',
-                                    'transcript_path': write_transcript(tmp_path)}, saved)
-        assert saved[0] == ('[claude] given reply', 't-prev')
-
-    def test_no_duplicate_when_stop_saved_it(self, tmp_path, monkeypatch):
-        n3memory._write_turn_id('t-prev', 'sess')
-        c = {'server_port': 1, 'owner_id': 'o'}
-        monkeypatch.setattr(n3memory, 'ensure_server', lambda c: False)
-        monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps(
-            {'session_id': 'sess', 'last_assistant_message': EXPECTED_PREV})))
-        n3memory.cmd_save_claude_turn(c)
-        monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps(
-            {'session_id': 'sess', 'prompt': 'second question',
-             'transcript_path': write_transcript(tmp_path)})))
-        n3memory.cmd_hook_submit(dict(c, search_query_max_chars=2000))
-        conn = db.get_connection(n3memory.DB_PATH)
-        try:
-            n = conn.execute("SELECT COUNT(*) FROM memories WHERE content LIKE '[claude%'"
-                             ).fetchone()[0]
-        finally:
-            conn.close()
-        assert n == 1
-
-    @pytest.mark.parametrize('kind', ['missing', 'broken'])
-    def test_unreadable_transcript_logged(self, tmp_path, monkeypatch, capsys, kind):
-        if kind == 'missing':
-            tp = str(tmp_path / 'nope.jsonl')
-        else:
-            bad = tmp_path / 'bad.jsonl'
-            bad.write_bytes(b'\x00\x01 garbage {{{\n')
-            tp = str(bad)
-        saved = []
-        self.run_hook(monkeypatch, {'session_id': 's', 'prompt': 'hello world',
-                                    'transcript_path': tp}, saved)
-        assert any(l.get('stage') == 'transcript_unreadable' for l in audit_lines())
-        assert saved and saved[-1][0] == '[user] hello world'
-        assert '# Recalled Memory Context' in capsys.readouterr().out
-
-    def test_image_only_prompt_new_turn_id(self, monkeypatch):
-        n3memory._write_turn_id('keep', 'sess')
-        saved = []
-        self.run_hook(monkeypatch, {'session_id': 'sess',
-                                    'prompt': [{'type': 'image', 'source': {}}]}, saved)
-        assert n3memory._read_turn_id('sess') not in (None, 'keep')
-        assert not any(t.startswith('[user') for t, _ in saved)
-
-
 # --------------------------------------------------------------------------- purify before chunk (v1.5.0)
 class TestPurifyBeforeChunk:
     def hook_saved(self, monkeypatch, text):
         saved = []
+        monkeypatch.setattr(codex_entry, 'MEMORY_DIR', n3memory.MEMORY_DIR)
+        monkeypatch.setattr(n3memory, '_load_config',
+                            lambda: {'server_port': 1, 'search_query_max_chars': 2000})
         monkeypatch.setattr(n3memory, 'ensure_server', lambda c: True)
         monkeypatch.setattr(n3memory, '_post', lambda c, p, *a, **k: (
             {'results': [], 'pairs': {}, 'pairs_omitted': {}} if p == '/search' else {}))
         monkeypatch.setattr(n3memory, '_do_buffer',
                             lambda t, c, **k: saved.append(t))
-        monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps({'prompt': text})))
-        n3memory.cmd_hook_submit({'server_port': 1, 'search_query_max_chars': 2000})
+        codex_entry._handle('--prompt', {'session_id': 's', 'turn_id': 't', 'prompt': text})
         return '\n'.join(saved)
 
     def test_prose_between_code_blocks_kept(self, monkeypatch):
@@ -1561,59 +1183,23 @@ class TestInit:
             n3memory.main()
         assert ei.value.code == 1
 
+    def test_codex_init_and_stop_do_not_modify_project_files(self, settings, tmp_path, monkeypatch):
+        claude_dir = stop_in(tmp_path, monkeypatch)
+        rule = claude_dir / 'rules' / 'n3mc-behavior.md'
+        rule.write_text('# rules of another tool\n', encoding='utf-8')
+        md = claude_dir / 'CLAUDE.md'
+        md.write_text('@.memory/memory_context.md\n', encoding='utf-8')
+        before = {p: p.read_bytes() for p in (rule, md)}
+        assert n3memory.cmd_init() == 0
+        n3memory.cmd_stop({})
+        assert {p: p.read_bytes() for p in (rule, md)} == before
+        assert sorted(os.listdir(tmp_path / 'proj')) == ['.claude']
+
     def test_other_configuration_is_preserved(self, settings):
         original = {'permissions': {'allow': ['custom'], 'deny': ['another']}}
         settings.write_text(json.dumps(original), encoding='utf-8')
         assert n3memory.cmd_init() == 0
         assert json.loads(settings.read_text(encoding='utf-8'))['permissions'] == original['permissions']
-
-    def test_codex_init_and_stop_do_not_modify_claude_files(self, settings, tmp_path, monkeypatch):
-        claude_dir = stop_in(tmp_path, monkeypatch)
-        rule = claude_dir / 'rules' / 'n3mc-behavior.md'
-        rule.write_text(OLD_TEMPLATE_V1, encoding='utf-8')
-        md = claude_dir / 'CLAUDE.md'
-        md.write_text('@' + n3memory.CONTEXT_FILE, encoding='utf-8')
-        before = {p: p.read_bytes() for p in (rule, md)}
-        assert n3memory.cmd_init() == 0
-        n3memory.cmd_stop({})
-        assert {p: p.read_bytes() for p in (rule, md)} == before
-
-    def test_resolve_finds_scripts_folder_with_empty_path(self, tmp_path, monkeypatch):
-        scripts = tmp_path / 'Py312' / 'Scripts'
-        scripts.mkdir(parents=True)
-        (scripts / 'n3mc-hook.exe').write_text('')
-        monkeypatch.setattr(n3memory.sysconfig, 'get_path', lambda *a, **k: str(scripts))
-        monkeypatch.setattr(n3memory.shutil, 'which', lambda n: None)
-        monkeypatch.setenv('PATH', '')
-        cmd = n3memory._resolve_hook_command('n3mc-hook')
-        assert cmd == (scripts / 'n3mc-hook.exe').as_posix()
-        assert not cmd.startswith('"')
-        assert n3memory.is_own_hook(cmd, 'UserPromptSubmit')
-
-    def test_resolve_m_form_unquoted_without_space(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(n3memory.sysconfig, 'get_path', lambda *a, **k: str(tmp_path / 'none'))
-        monkeypatch.setattr(n3memory.shutil, 'which', lambda n: None)
-        monkeypatch.setattr(n3memory.sys, 'executable', r'C:\Py312\python.exe')
-        cmd = n3memory._resolve_hook_command('n3mc-hook')
-        assert cmd == 'C:/Py312/python.exe -m n3memorycore.n3mc_hook'
-        assert n3memory.is_own_hook(cmd, 'UserPromptSubmit')
-
-    def test_resolve_m_form_quoted_with_space(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(n3memory.sysconfig, 'get_path', lambda *a, **k: str(tmp_path / 'none'))
-        monkeypatch.setattr(n3memory.shutil, 'which', lambda n: None)
-        monkeypatch.setattr(n3memory.sys, 'executable', r'C:\Program Files\Py312\python.exe')
-        cmd = n3memory._resolve_hook_command('n3mc-hook')
-        assert cmd == '"C:/Program Files/Py312/python.exe" -m n3memorycore.n3mc_hook'
-        assert n3memory.is_own_hook(cmd, 'UserPromptSubmit')
-
-    def test_is_own_hook_unit(self):
-        own = n3memory.is_own_hook
-        assert own('C:/x/Scripts/n3mc-hook.EXE', 'UserPromptSubmit')
-        assert own('n3mc-stop-hook', 'Stop')
-        assert own('"/usr/bin/python3" -m n3memorycore.n3mc_hook', 'UserPromptSubmit')
-        assert not own(PRO_HOOK, 'UserPromptSubmit')
-        assert not own('echo n3mc_hook', 'UserPromptSubmit')
-        assert not own('n3mc-hook', 'Stop')
 
 
 # --------------------------------------------------------------------------- housekeeping (v1.5.0)
@@ -1840,35 +1426,6 @@ class TestRender(TestRender):  # v1.6.0 additions
         assert proc.WEAK_HEADING not in md
 
 
-def _v2_template() -> str:
-    """The v1.4.0 – v1.5.0 template, rebuilt from the current one."""
-    t = n3memory._BEHAVIOR_MD_CONTENT.replace(
-        '<!-- n3mc-behavior v3 -->', '<!-- n3mc-behavior v2 -->')
-    start = t.index('## Weak Matches')
-    end = t.index('## Active RAG')
-    return t[:start] + t[end:]
-
-
-class TestBehaviorMd(TestBehaviorMd):  # v1.6.0 additions
-    def test_marker_is_v3_with_weak_section(self):
-        assert n3memory._BEHAVIOR_MD_MARKER == '<!-- n3mc-behavior v3 -->'
-        assert '## Weak Matches' in n3memory._BEHAVIOR_MD_CONTENT
-
-    def test_v2_template_hash_known(self):
-        assert n3memory._behavior_md_hash(_v2_template()) == '5af3c015c06c62c1'
-        assert '5af3c015c06c62c1' in n3memory._KNOWN_BEHAVIOR_MD_HASHES
-
-    def test_v2_template_replaced(self, tmp_path, monkeypatch):
-        claude_dir = stop_in(tmp_path, monkeypatch)
-        rule = claude_dir / 'rules' / 'n3mc-behavior.md'
-        rule.write_text(_v2_template(), encoding='utf-8')
-        n3memory._ensure_behavior_md(str(rule))
-        text = rule.read_text(encoding='utf-8')
-        assert text.splitlines()[0].strip() == '<!-- n3mc-behavior v3 -->'
-        assert '## Weak Matches' in text
-        assert [p for p in os.listdir(rule.parent) if '.bak-n3mc-' in p]
-
-
 class TestConfig(TestConfig):  # v1.6.0 additions
     @pytest.mark.parametrize('value', ['-1', '1.5'])
     def test_min_results_out_of_range_ignored(self, value):
@@ -1990,36 +1547,6 @@ class TestRepairKeepsWritesOpen:
 
 
 # --------------------------------------------------------------------------- lone surrogates (final review 2026-11-18, F12)
-class TestLoneSurrogateHook:
-    """spec §4.5: a prompt or reply with a lone surrogate is saved without it; the hook does not fail."""
-
-    def test_prompt_and_reply_are_saved(self, monkeypatch, capsys):
-        saved, queries = [], []
-        monkeypatch.setattr(n3memory, 'ensure_server', lambda c: True)
-
-        def fake_post(c, p, *a, **k):
-            if p == '/search':
-                queries.append((a[0] if a else k.get('payload', {})).get('query'))
-                return {'results': [], 'pairs': {}, 'pairs_omitted': {}}
-            return {}
-        monkeypatch.setattr(n3memory, '_post', fake_post)
-        monkeypatch.setattr(n3memory, '_do_buffer', lambda text, c, **k: saved.append(text))
-        monkeypatch.setattr('sys.stdin', io.StringIO(
-            '{"session_id": "s", "prompt": "broken \\ud83d emoji", "last_assistant_message": "reply \\udc00 half"}'))
-        n3memory.cmd_hook_submit({'server_port': 1, 'search_query_max_chars': 2000, 'owner_id': 'o'})
-        out = capsys.readouterr().out
-        out.encode('utf-8')
-        assert '# Recalled Memory Context' in out
-        assert saved == ['[claude] reply  half', '[user] broken  emoji']
-        assert queries and all('\ud83d' not in (q or '') for q in queries)
-
-    def test_stop_hook_reply(self, monkeypatch):
-        saved = []
-        monkeypatch.setattr(n3memory, 'ensure_server', lambda c: True)
-        monkeypatch.setattr(n3memory, '_do_buffer', lambda text, c, **k: saved.append(text))
-        monkeypatch.setattr('sys.stdin', io.StringIO('{"session_id": "s2", "last_assistant_message": "end \\ud83d here"}'))
-        n3memory.cmd_save_claude_turn({'server_port': 1, 'owner_id': 'o'})
-        assert saved == ['[claude] end  here']
 
 
 # --------------------------------------------------------------------------- DB corruption that raises (final review 2026-11-18, F13)
