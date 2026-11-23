@@ -2,7 +2,7 @@
 
 **Give Codex a memory that does not disappear.**
 
-Codex forgets what you were talking about when you close the chat.
+Codex has a built-in memory feature that can carry useful context across chats.
 N3MemoryCore saves your prompts and the final replies to a file on your PC.
 The next time the topic comes up, it recalls the related memories automatically.
 You do not have to say "remember this", and Codex does not have to call a search tool.
@@ -91,6 +91,18 @@ record_id=06b04003-3496-79c0-8000-4a9fff285e13 turn_id=turn-mon-en role=assistan
 `Top matches` are the records that passed the relevance floors. Each record carries its record ID, its turn ID, its role and its source. The last part is the whole exchange that the top records belong to.
 Reply records start with `[claude]`. This keeps the same form as the DB of the main Free edition; the agent that wrote them is recorded as `codex`.
 The `turn_id` values in this example are names given when it was taken. In real use, they are the IDs Codex passes.
+
+### Alongside Codex's built-in memories
+
+Codex's local memories and N3MemoryCore can be used together. They use separate local stores; enabling N3MemoryCore does not turn off Codex memories or merge the two stores.
+
+| | Codex built-in memories | N3MemoryCore Free for Codex |
+|---|---|---|
+| **How it saves** | Extracts useful context from eligible past chats in the background; updates may take time | Trusted hooks save eligible prompts and final replies on each turn |
+| **How it recalls** | Supplies selected memory context to later chats when enabled | Searches its own records on each prompt and adds related matches to the context |
+| **Best use** | Helpful summaries of preferences and earlier work | Searchable conversation details and the reasons behind past decisions |
+
+Both can surface related context in the same chat, so you may see overlap. Check current files and other live sources before relying on a recalled fact. Keep instructions that must always apply in `AGENTS.md`. Codex memories are controlled in **Settings → Personalization** and per chat with `/memories`; N3MemoryCore uses the separately trusted `/hooks` handlers. [Codex memories documentation](https://learn.chatgpt.com/docs/customization/memories).
 
 ## About this project
 
