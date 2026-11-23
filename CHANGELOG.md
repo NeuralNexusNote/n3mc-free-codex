@@ -21,6 +21,9 @@ User-visible changes to N3MemoryCore Free for Codex.
 ### Fixed
 - Instruction documents: two sentences named another assistant instead of Codex.
 
+### Removed
+- The compatibility paths for another host: the `--hook-submit` and `--save-claude-turn` commands, the `n3mc_hook.py` and `n3mc_stop_hook.py` modules, the helpers that registered hooks in that host's settings file, and the rules-file template. The Codex hooks use `codex_entry.py` only, so nothing a Codex installation runs is removed. The instruction documents and the tests follow.
+
 ## [1.9.0] - 2026-11-18
 
 - Codex `UserPromptSubmit` and `Stop` hooks capture prompts and final replies with the same turn ID.

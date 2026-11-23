@@ -49,20 +49,6 @@ def test_repair_restores_only_missing_bigram_rows(tmp_db, monkeypatch, dummy_vec
         conn.close()
 
 
-@pytest.mark.parametrize('previous', ['prior answer already handled by Stop', {'text': 'invalid'}])
-def test_codex_prompt_does_not_resave_previous_answer(monkeypatch, previous):
-    saved = []
-    monkeypatch.setattr(n3memory, 'ensure_server', lambda _: False)
-    monkeypatch.setattr(n3memory, '_do_search', lambda *a, **k: None)
-    monkeypatch.setattr(n3memory, '_do_buffer', lambda text, cfg, **kw: saved.append((text, kw)))
-    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps({
-        'thread_id': 'chat', 'turn_id': 'current', 'prompt': 'hello',
-        'last_assistant_message': previous})))
-    n3memory.cmd_hook_submit({})
-    assert [text for text, _ in saved] == ['[user] hello']
-    assert saved[0][1]['turn_id'] == 'current'
-
-
 def test_unrecoverable_save_is_reported_as_hook_failure(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(codex_entry, 'MEMORY_DIR', str(tmp_path))
     monkeypatch.setattr(n3memory, '_load_config', lambda: {})

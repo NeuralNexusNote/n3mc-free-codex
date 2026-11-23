@@ -1,5 +1,4 @@
 """Layer 4: hook integration — complete recording, chunk, audit log (spec §7)."""
-import json
 import uuid
 import os
 import tempfile
@@ -49,77 +48,6 @@ class TestChunkText:
         chunks = chunk_text(text, max_chars=400, overlap=40)
         assert len(chunks) >= 2
         assert len(chunks[0]) == 400
-
-
-# ---------------------------------------------------------------------------
-class TestStripImages:
-    """_extract_text filters out image payloads, returning only text parts."""
-
-    def test_plain_text_unchanged(self):
-        from n3memorycore.n3memory import _extract_text
-        assert _extract_text('hello world') == 'hello world'
-
-    def test_base64_image_stripped(self):
-        from n3memorycore.n3memory import _extract_text
-        payload = json.dumps([
-            {'type': 'text', 'text': 'describe the image'},
-            {'type': 'image_url', 'url': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA'},
-        ])
-        result = _extract_text(payload)
-        assert 'iVBORw0KGgoAAAANSUhEUgAA' not in result
-        assert 'describe the image' in result
-
-    def test_image_only_payload_returns_empty(self):
-        from n3memorycore.n3memory import _extract_text
-        payload = json.dumps([
-            {'type': 'image_url', 'url': 'data:image/jpeg;base64,/9j/4AAQSkZJRg=='},
-        ])
-        result = _extract_text(payload)
-        assert result.strip() == ''
-
-
-# ---------------------------------------------------------------------------
-class TestExtractText:
-
-    def test_plain_string(self):
-        from n3memorycore.n3memory import _extract_text
-        assert _extract_text('hello') == 'hello'
-
-    def test_multimodal_json_list(self):
-        from n3memorycore.n3memory import _extract_text
-        payload = json.dumps([
-            {'type': 'text', 'text': 'user text'},
-            {'type': 'image_url', 'url': 'data:...'},
-        ])
-        result = _extract_text(payload)
-        assert result == 'user text'
-
-    def test_multimodal_list_ignores_nontext_values(self):
-        from n3memorycore.n3memory import _extract_text
-        assert _extract_text([
-            {'type': 'text', 'text': 42},
-            {'type': 'text', 'text': 'search this'},
-            {'type': 'image_url', 'url': 'data:...'},
-        ]) == 'search this'
-
-    def test_image_only_empty(self):
-        from n3memorycore.n3memory import _extract_text
-        payload = json.dumps([{'type': 'image_url', 'url': 'data:...'}])
-        result = _extract_text(payload)
-        assert result.strip() == ''
-
-    def test_empty_input(self):
-        from n3memorycore.n3memory import _extract_text
-        assert _extract_text('') == ''
-        assert _extract_text(None) == ''
-
-    def test_json_text_is_kept_as_typed(self):
-        # spec §4.5 (2026-11-16): only an array of objects with a `type` key
-        # is a multimodal array; other valid JSON is the user's own text.
-        from n3memorycore.n3memory import _extract_text
-        for typed in ('[1, 2, 3]', '["apple", "banana"]', '[]', '[{"id": 1}]',
-                      '[{"type": "text", "text": "a"}, 5]', '{"a": 1}', '123'):
-            assert _extract_text(typed) == typed
 
 
 # ---------------------------------------------------------------------------
@@ -179,53 +107,32 @@ class TestCompleteRecording:
 class TestStopIdempotency:
     """Codex --stop only runs housekeeping; it never edits project guidance."""
 
-    def test_no_import_added(self, tmp_path, monkeypatch):
+    def test_project_guidance_unchanged(self, tmp_path, monkeypatch):
         from n3memorycore import n3memory
 
-        claude_dir = tmp_path / '.claude'
-        claude_dir.mkdir()
-        rules_dir = claude_dir / 'rules'
-        rules_dir.mkdir()
-        claude_md = claude_dir / 'CLAUDE.md'
+        project = tmp_path / 'proj'
+        (project / '.claude' / 'rules').mkdir(parents=True)
+        files = {
+            project / 'AGENTS.md': '# My project\n',
+            project / '.claude' / 'CLAUDE.md': '# My project\n',
+        }
+        for path, text in files.items():
+            path.write_text(text, encoding='utf-8')
+        monkeypatch.chdir(project)
 
-        # Patch claude_paths to use tmp
-        monkeypatch.setattr(
-            n3memory, 'claude_paths',
-            lambda cwd=None: {
-                'CLAUDE_DIR':  str(claude_dir),
-                'CLAUDE_MD':   str(claude_md),
-                'RULES_DIR':   str(rules_dir),
-                'BEHAVIOR_MD': str(rules_dir / 'n3mc-behavior.md'),
-            }
-        )
+        n3memory.cmd_stop({})
+        n3memory.cmd_stop({})  # second call must be idempotent
 
-        claude_md.write_text('# My project\n', encoding='utf-8')
-        cfg = {}
-        n3memory.cmd_stop(cfg)
-        n3memory.cmd_stop(cfg)  # second call must be idempotent
-
-        content = claude_md.read_text(encoding='utf-8')
-        assert content == '# My project\n'
-        assert 'memory_context' not in content
+        for path, text in files.items():
+            assert path.read_text(encoding='utf-8') == text
 
     def test_rules_file_not_created(self, tmp_path, monkeypatch):
         from n3memorycore import n3memory
 
-        claude_dir = tmp_path / '.claude'
-        claude_dir.mkdir()
-        rules_dir = claude_dir / 'rules'
-        rules_dir.mkdir()
-        behavior_md = rules_dir / 'n3mc-behavior.md'
-
-        monkeypatch.setattr(
-            n3memory, 'claude_paths',
-            lambda cwd=None: {
-                'CLAUDE_DIR':  str(claude_dir),
-                'CLAUDE_MD':   str(claude_dir / 'CLAUDE.md'),
-                'RULES_DIR':   str(rules_dir),
-                'BEHAVIOR_MD': str(behavior_md),
-            }
-        )
+        project = tmp_path / 'proj'
+        (project / '.claude' / 'rules').mkdir(parents=True)
+        monkeypatch.chdir(project)
 
         n3memory.cmd_stop({})
-        assert not behavior_md.exists()
+        assert not (project / '.claude' / 'rules' / 'n3mc-behavior.md').exists()
+        assert not (project / 'AGENTS.md').exists()

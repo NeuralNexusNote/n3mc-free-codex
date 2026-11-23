@@ -26,7 +26,6 @@ import re
 import shutil
 import sqlite3
 import subprocess
-import sysconfig
 import tempfile
 import threading
 import time
@@ -35,8 +34,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from .paths import HOME_DIR, MEMORY_DIR, DB_PATH, PID_FILE, AUDIT_LOG, CONFIG_FILE, NOTICES_FILE, claude_paths
-from .paths import TURN_ID_FILE, CONTEXT_FILE, CONTEXT_RETIRED_MARKER
+from .paths import HOME_DIR, MEMORY_DIR, DB_PATH, PID_FILE, AUDIT_LOG, CONFIG_FILE, NOTICES_FILE
 from .paths import SERVER_LOG, SERVER_START_FAILED_MARKER
 from .paths import python_cmd
 from .core.database import (
@@ -47,7 +45,7 @@ from .core.database import (
 )
 from .core.processor import (
     embed_passage, cosine_sim_from_l2, hybrid_search,
-    chunk_text, add_chunk_prefixes, purify_text, render_memory_context,
+    purify_text, render_memory_context,
 )
 
 logging.basicConfig(level=logging.WARNING)
@@ -1141,7 +1139,7 @@ _srv_cfg: dict = {}
 _srv_session: str = ""
 _srv_code_version: str = ""
 
-# spec §3.5 (v1.5.0): one /repair batch per --hook-submit turn
+# spec §3.5 (v1.5.0): one /repair batch per prompt-hook turn
 _HOOK_REPAIR_MAX_RECORDS = 200
 
 
@@ -1604,63 +1602,6 @@ except ImportError:
 # CLI helpers
 # ---------------------------------------------------------------------------
 
-def _turn_id_file(cc_session_id: str = '') -> str:
-    """Resolve turn_id file path (session-specific or legacy)."""
-    if cc_session_id:
-        safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', cc_session_id)[:64]
-        return os.path.join(MEMORY_DIR, f'turn_id_{safe_id}.txt')
-    return TURN_ID_FILE
-
-
-def _read_turn_id(cc_session_id: str = '') -> Optional[str]:
-    # spec §2: turn_id_<session>.txt per Claude Code session_id; turn_id.txt
-    # only when there is no session_id (never another session's file).
-    f = _turn_id_file(cc_session_id)
-    if os.path.exists(f):
-        try:
-            with open(f, 'r', encoding='utf-8') as fh:
-                tid = fh.read().strip()
-            return tid or None
-        except Exception:
-            pass
-    return None
-
-
-def _write_turn_id(tid: str, cc_session_id: str = '') -> None:
-    os.makedirs(MEMORY_DIR, exist_ok=True)
-    with open(_turn_id_file(cc_session_id), 'w', encoding='utf-8') as f:
-        f.write(tid)
-
-
-def _is_multimodal_parts(parts) -> bool:
-    """spec §4.5: a non-empty JSON array whose elements are all objects with
-    a string `type` key. Typed text that happens to be valid JSON
-    (`[1, 2, 3]`, `["a", "b"]`, `[]`) is not such an array."""
-    return (isinstance(parts, list) and bool(parts)
-            and all(isinstance(p, dict) and isinstance(p.get('type'), str)
-                    for p in parts))
-
-
-def _extract_text(prompt) -> str:
-    if isinstance(prompt, str):
-        try:
-            parts = json.loads(prompt)
-        except Exception:
-            return prompt
-        if _is_multimodal_parts(parts):
-            return ' '.join(
-                p.get('text', '') for p in parts
-                if p.get('type') == 'text' and isinstance(p.get('text', ''), str)
-            )
-        return prompt
-    if isinstance(prompt, list):
-        return ' '.join(
-            p.get('text', '') for p in prompt
-            if isinstance(p, dict) and p.get('type') == 'text'
-            and isinstance(p.get('text', ''), str)
-        )
-    return str(prompt) if prompt else ''
-
 
 def _do_buffer(
     text: str, cfg: dict,
@@ -1921,197 +1862,8 @@ def cmd_show_turn(turn_id: str, cfg: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# --stop: behavior rules + memory_context retirement (spec §4)
+# --stop: housekeeping (spec §4)
 # ---------------------------------------------------------------------------
-
-_BEHAVIOR_MD_MARKER = '<!-- n3mc-behavior v3 -->'
-
-_BEHAVIOR_MD_CONTENT = _BEHAVIOR_MD_MARKER + """
-# N3MemoryCore Behavioral Guidelines
-
-These guidelines apply to every Claude Code session in this project. They are
-loaded automatically from `.claude/rules/` at session start.
-
-## Fully Automatic Saving
-All conversations are saved by hooks (UserPromptSubmit + Stop). Do NOT call
-`--buffer` manually. Every non-empty user message and Claude response is
-recorded character-for-character; there is no length filter and no skip-pattern
-filter. Make NO acknowledgement when a save succeeds — silence is correct.
-
-## Recalled Memory Context
-Every turn, the UserPromptSubmit hook adds a `# Recalled Memory Context` block
-to your context. Read `## Top matches` first; use
-`## Previous matching Q-A exchanges` as supporting context. When several
-versions of the same content appear, the one with the newest `saved` time is
-the current one. If the block contains a `> ⚠️ N3MC notice:` line, tell the
-user what it says.
-
-## Weak Matches
-Records under `## Possibly related (weak matches — may be unrelated)` did not
-pass the relevance floors and are often unrelated. Use one only when it is
-actually relevant to the question; if it is not, ignore it and do not mention
-it.
-
-## Active RAG
-When prior context would help, run a search proactively. **Always invoke via
-`python -m n3memorycore.n3memory --search "<keywords>"`**, NOT the bare `n3mc`
-console script. Claude Code spawns a bash subprocess whose `PATH` does not
-reliably include the Python `Scripts/` directory where the `n3mc` entry-point
-lives, so `n3mc --search ...` works in interactive shells but fails in
-production with `command not found`. `python -m` resolves through the Python
-interpreter (which is on `PATH`) and is portable across venvs and platforms.
-Both invocation forms are auto-allowed via `permissions.allow`.
-
-## Cut Exchanges
-A Q-A exchange may end with a line like
-`_(N more chunk(s) of this exchange omitted. Full text: ...)_`. If the omitted
-part is needed for your answer, run the command shown there
-(`python -m n3memorycore.n3memory --show-turn <turn_id>`) and read the full
-text before answering.
-
-## Recall Acknowledgment
-When recalled memory actually shapes your reply (you are recalling something
-saved earlier), open the reply with a short acknowledgment in the user's
-language — e.g. "Pulling this from earlier memory in this session." or
-「前回の回答がメモリに保存されています。」 If no relevant memory was found,
-or it did not influence your answer, do NOT announce anything.
-
-## Fatal-Failure Warning
-If a save fails physically, surface the warning prominently:
-> ⚠️ Physical save failed. Current memories may be lost.
-"""
-
-# Templates shipped before the current one (sha256 of LF-normalized text,
-# first 16 hex). Add the previous template's hash whenever the template changes.
-_KNOWN_BEHAVIOR_MD_HASHES = frozenset({
-    'ade0a59b94f59f9a',  # v1.2.x – v1.3.x
-    '34ed39efe5a3833d',  # v1.2.0 scaffolding
-    '5af3c015c06c62c1',  # v2 template, v1.4.0 – v1.5.0
-})
-
-
-def _behavior_md_hash(text: str) -> str:
-    t = text.replace('\r\n', '\n').replace('\r', '\n')
-    return hashlib.sha256(t.encode('utf-8')).hexdigest()[:16]
-
-
-def _backup(path: str) -> str:
-    dst = f"{path}.bak-n3mc-{datetime.now():%Y%m%d%H%M%S}"
-    shutil.copy2(path, dst)
-    return dst
-
-
-def _behavior_notice_key(path: str) -> str:
-    """spec §4 (v1.5.0): behavior_md_edited:<first 12 hex of sha256(abs path)>."""
-    h = hashlib.sha256(os.path.abspath(path).encode('utf-8')).hexdigest()[:12]
-    return f'behavior_md_edited:{h}'
-
-
-def _ensure_behavior_md(path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    key = _behavior_notice_key(path)
-    # v1.4.0 used one key without the path; v1.5.0 never emits it.
-    _clear_notice('behavior_md_edited')
-    if not os.path.exists(path):
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(_BEHAVIOR_MD_CONTENT)
-        return
-    with open(path, 'r', encoding='utf-8') as f:
-        text = f.read()
-    first_line = text.lstrip('﻿').splitlines()[0].strip() if text else ''
-    if first_line == _BEHAVIOR_MD_MARKER:
-        # The user merged the template (or it is ours): nothing to report.
-        _clear_notice(key)
-        return
-    if _behavior_md_hash(text) in _KNOWN_BEHAVIOR_MD_HASHES:
-        _backup(path)
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(_BEHAVIOR_MD_CONTENT)
-        _clear_notice(key)
-        return
-    _notify(
-        key,
-        f"The rules file {os.path.abspath(path)} has been edited by hand, so it "
-        "was not updated. Merge the new template manually if needed.",
-    )
-
-
-_MEMORY_CONTEXT_IMPORT_RE = re.compile(r'^[ \t]*@[^\n]*memory_context\.md[ \t]*$')
-_N3MC_COMMENT_PREFIXES = (
-    '# N3MemoryCore — ',
-    '# N3MemoryCore - ',
-    '# Path resolves to ',
-    '# If you have not yet run ',
-)
-
-
-def _cmp_path(path: str) -> str:
-    """Normalize for comparison: forward and back slashes compare equal."""
-    p = path.replace('\\', '/')
-    return os.path.normcase(os.path.normpath(p))
-
-
-def _is_own_context_import(line: str) -> bool:
-    """spec §4 (v1.5.0): the @ line names this installation's own
-    CONTEXT_FILE by an absolute path."""
-    body = line.rstrip('\r\n')
-    if not _MEMORY_CONTEXT_IMPORT_RE.match(body):
-        return False
-    target = body.strip()[1:].strip()
-    target = os.path.expanduser(target)
-    if not os.path.isabs(target):
-        return False
-    return _cmp_path(target) == _cmp_path(CONTEXT_FILE)
-
-
-def _retire_memory_context(claude_md: str) -> None:
-    """spec §4 (v1.5.0): remove the legacy @import of THIS installation's
-    memory_context.md from <cwd>/.claude/CLAUDE.md (backup first, keep
-    LF/CRLF) and delete the leftover global memory_context.md once."""
-    if os.path.exists(claude_md):
-        try:
-            with open(claude_md, 'rb') as f:
-                text = f.read().decode('utf-8')
-        except Exception:
-            text = None
-        if text is not None:
-            # Lines keep their own endings (LF / CRLF), so the file is written
-            # back with its original line endings.
-            lines = text.splitlines(keepends=True)
-            drop = set()
-            for i, line in enumerate(lines):
-                if not _is_own_context_import(line):
-                    continue
-                drop.add(i)
-                # The N3MC comment lines just before it (blank lines between
-                # the comment block and the @import go with them).
-                j = i - 1
-                first_comment = None
-                while j >= 0 and j not in drop:
-                    body = lines[j].rstrip('\r\n')
-                    if body.startswith(_N3MC_COMMENT_PREFIXES):
-                        first_comment = j
-                    elif body.strip():
-                        break
-                    j -= 1
-                if first_comment is not None:
-                    drop.update(range(first_comment, i))
-            if drop:
-                new_text = ''.join(l for k, l in enumerate(lines) if k not in drop)
-                _backup(claude_md)
-                with open(claude_md, 'wb') as f:
-                    f.write(new_text.encode('utf-8'))
-
-    # Leftover global memory_context.md: delete once, then mark as retired.
-    if not os.path.exists(CONTEXT_RETIRED_MARKER) and os.path.exists(CONTEXT_FILE):
-        try:
-            os.remove(CONTEXT_FILE)
-            os.makedirs(os.path.dirname(CONTEXT_RETIRED_MARKER), exist_ok=True)
-            with open(CONTEXT_RETIRED_MARKER, 'w', encoding='utf-8') as f:
-                f.write(datetime.now(timezone.utc).isoformat())
-        except Exception as e:
-            print(f"Warning: could not retire memory_context.md: {e}", file=sys.stderr)
-
 
 # spec §4 --stop housekeeping (v1.5.0)
 _TURN_ID_MAX_AGE_SECONDS = 30 * 86400
@@ -2148,221 +1900,6 @@ def cmd_stop(cfg: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Hooks
-# ---------------------------------------------------------------------------
-
-_TRANSCRIPT_TAIL_BYTES = 5 * 1024 * 1024
-# spec §4.5 D3 step 2: user-line texts that are not a real prompt.
-_NON_PROMPT_PREFIXES = ('[Request interrupted by user', '<command-', '<local-command-')
-
-
-class TranscriptUnreadable(Exception):
-    pass
-
-
-def _content_texts(content) -> Optional[list]:
-    """Text parts of message.content: [str] for a string, the type=="text"
-    parts for a list, None for anything else."""
-    if isinstance(content, str):
-        return [content]
-    if isinstance(content, list):
-        return [p.get('text', '') for p in content
-                if isinstance(p, dict) and p.get('type') == 'text'
-                and isinstance(p.get('text', ''), str)]
-    return None
-
-
-def _read_previous_response(transcript_path, current_prompt: str) -> str:
-    """spec §4.5 (decision D3, v1.5.0): the last assistant reply that
-    precedes the current prompt, read from the session's JSONL transcript.
-
-    Raises TranscriptUnreadable on any failure (the caller logs it)."""
-    if not transcript_path or not isinstance(transcript_path, str):
-        raise TranscriptUnreadable('no transcript_path')
-    try:
-        size = os.path.getsize(transcript_path)
-        with open(transcript_path, 'rb') as f:
-            start = max(0, size - _TRANSCRIPT_TAIL_BYTES)
-            f.seek(start)
-            data = f.read()
-    except Exception as e:
-        raise TranscriptUnreadable(f'{type(e).__name__}: {e}') from None
-    text = data.decode('utf-8', errors='replace')
-    lines = text.splitlines()
-    if start > 0 and lines:
-        lines = lines[1:]          # first line may be cut by the seek
-
-    current = (current_prompt or '').strip()
-    parsed_any = False
-    # spec §4.5 step 3 (C-05): only the trailing line may be the current
-    # prompt. Lines skipped by step 1 and isMeta lines do not count.
-    trailing = True
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except Exception:
-            continue
-        parsed_any = True
-        if not isinstance(obj, dict) or obj.get('isSidechain') is True:
-            continue
-        typ = obj.get('type')
-        if typ not in ('user', 'assistant'):
-            continue
-        msg = obj.get('message')
-        content = msg.get('content') if isinstance(msg, dict) else None
-        if typ == 'user':
-            if obj.get('isMeta') is True:
-                continue           # meta line, not a prompt
-            parts = _content_texts(content)
-            is_prompt = isinstance(content, str) or bool(
-                isinstance(content, list) and any(
-                    isinstance(p, dict) and p.get('type') == 'text' for p in content))
-            if not is_prompt:
-                trailing = False
-                continue           # tool_result-only line: same reply
-            first = (parts[0] if parts else '').lstrip()
-            if first.startswith(_NON_PROMPT_PREFIXES) or \
-                    first.startswith(tuple(_SYSTEM_PROMPT_PREFIXES)):
-                trailing = False
-                continue           # interruption marker / slash command / system input
-            joined = '\n\n'.join(parts or []).strip()
-            if trailing and (joined == current
-                             or ' '.join(parts or []).strip() == current):
-                trailing = False
-                continue           # the current prompt itself (trailing line only)
-            break                  # the previous real user prompt: no response
-        trailing = False
-        # assistant: the LAST non-empty text part of the newest assistant line
-        # that has one — the same block Stop receives as last_assistant_message.
-        parts = _content_texts(content) if isinstance(content, list) else None
-        texts = [p for p in (parts or []) if p and p.strip()]
-        if texts:
-            return texts[-1]
-    if not parsed_any and any(l.strip() for l in lines):
-        raise TranscriptUnreadable('no JSON lines')
-    return ''
-
-
-def _save_claude_text(text: str, cfg: dict, session_id: Optional[str],
-                      turn_id: Optional[str], agent_name: str = 'codex') -> None:
-    """purify the whole text, then chunk and save as [claude] / [claude i/N]."""
-    cleaned = purify_text(text)
-    for chunk in add_chunk_prefixes(chunk_text(cleaned), 'claude'):
-        _do_buffer(chunk, cfg, agent_name=agent_name,
-                   session_id=session_id, turn_id=turn_id)
-
-
-def cmd_hook_submit(cfg: dict) -> None:
-    """spec §4.5: UserPromptSubmit hook — repair → buffer(claude) → search → buffer(user)."""
-    raw = sys.stdin.read()
-    try:
-        data = json.loads(raw)
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    # spec §4.5 (F12): lone surrogates (e.g. "\ud83d") cannot be encoded as
-    # UTF-8; remove them before the text is searched, printed or saved.
-    from .core.processor import sanitize_surrogates
-    data = sanitize_surrogates(data)
-
-    user_text     = _extract_text(data.get('prompt') or data.get('message') or '')
-    cc_session_id = data.get('thread_id') or data.get('session_id', '') or ''
-    if not isinstance(cc_session_id, str):
-        cc_session_id = str(cc_session_id)
-
-    # spec §4.5: system inputs (e.g. <task-notification>) — no search, no save,
-    # no new turn_id; the reply to it belongs to the current exchange.
-    if user_text.lstrip().startswith(_SYSTEM_PROMPT_PREFIXES):
-        _append_audit({'hook': 'UserPromptSubmit', 'stage': 'skipped',
-                       'reason': 'system_prompt'})
-        _emit(_status_md("_No relevant memories found._"))
-        return
-
-    codex_turn_id = data.get('turn_id') if data.get('thread_id') else None
-    # Codex Stop supplies the answer with the same turn_id. The transcript
-    # recovery path below is only for hosts without that contract.
-    # Previous assistant response: a supplied last_assistant_message wins;
-    # otherwise read it from the transcript (decision D3).
-    last_claude = '' if codex_turn_id else (data.get('last_assistant_message') or '')
-    if not codex_turn_id and (not isinstance(last_claude, str) or not last_claude.strip()):
-        last_claude = ''
-        try:
-            last_claude = sanitize_surrogates(
-                _read_previous_response(data.get('transcript_path'), user_text))
-        except TranscriptUnreadable as e:
-            _append_audit({'hook': 'UserPromptSubmit', 'stage': 'transcript_unreadable',
-                           'reason': str(e)[:200]})
-        except Exception as e:     # never let the transcript fail the hook
-            _append_audit({'hook': 'UserPromptSubmit', 'stage': 'transcript_unreadable',
-                           'reason': f'{type(e).__name__}: {e}'[:200]})
-
-    server_ok = ensure_server(cfg)
-
-    # Step 1: Repair unindexed records (own server only; one batch per turn)
-    if server_ok:
-        try:
-            _post(cfg, '/repair', {'max_records': _HOOK_REPAIR_MAX_RECORDS})
-        except Exception as e:
-            logger.warning(f"Repair failed during hook: {e}")
-
-    # Step 2: Save Claude's previous response under the previous turn_id
-    if last_claude.strip():
-        prev_tid = _read_turn_id(cc_session_id)
-        _save_claude_text(last_claude, cfg, cc_session_id or None, prev_tid,
-                          agent_name='codex' if codex_turn_id else 'claude-code')
-
-    # Step 3: Search memory for current query
-    q = user_text[:cfg.get('search_query_max_chars', 2000)]
-    _do_search(q, cfg, current_session=cc_session_id or None)
-
-    # Step 4: a new turn_id for every typed prompt (also image-only, v1.5.0);
-    # save the user message (purified as a whole, then chunked).
-    new_tid = codex_turn_id or str(uuid.uuid4())
-    if not codex_turn_id:
-        _write_turn_id(new_tid, cc_session_id)
-    if user_text.strip():
-        cleaned = purify_text(user_text)
-        for chunk in add_chunk_prefixes(chunk_text(cleaned), 'user'):
-            _do_buffer(chunk, cfg, agent_name='codex' if codex_turn_id else 'claude-code',
-                       session_id=cc_session_id or None, turn_id=new_tid)
-
-
-def cmd_save_claude_turn(cfg: dict) -> None:
-    """spec §4.5: Stop hook helper — save last_assistant_message via chunking.
-    The turn_id file is NOT cleared (the next UserPromptSubmit overwrites it);
-    a second Stop in the same turn is stopped by the same-turn exact check."""
-    raw = sys.stdin.read()
-    try:
-        data = json.loads(raw)
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    # spec §4.5 (F12): lone surrogates (e.g. "\ud83d") cannot be encoded as
-    # UTF-8; remove them before the text is searched, printed or saved.
-    from .core.processor import sanitize_surrogates
-    data = sanitize_surrogates(data)
-
-    last_claude   = data.get('last_assistant_message') or ''
-    cc_session_id = data.get('thread_id') or data.get('session_id', '') or ''
-
-    if not isinstance(last_claude, str) or not last_claude.strip():
-        return
-
-    tid = data.get('turn_id') if data.get('thread_id') else _read_turn_id(cc_session_id)
-    if not tid:
-        tid = str(uuid.uuid4())
-        _write_turn_id(tid, cc_session_id)
-    ensure_server(cfg)
-    _save_claude_text(last_claude, cfg, cc_session_id or None, tid,
-                      agent_name='codex' if data.get('thread_id') else 'claude-code')
-
-
-# ---------------------------------------------------------------------------
 # Server runner
 # ---------------------------------------------------------------------------
 
@@ -2384,159 +1921,8 @@ def run_server(cfg: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# n3mc --init  —  register hooks in ~/.claude/settings.json
+# n3mc --init  —  register the Codex hooks
 # ---------------------------------------------------------------------------
-
-_HOOK_EVENTS = {  # event -> (entry-point name, module name)
-    'UserPromptSubmit': ('n3mc-hook',      'n3memorycore.n3mc_hook'),
-    'Stop':             ('n3mc-stop-hook', 'n3memorycore.n3mc_stop_hook'),
-}
-
-# spec §4 ② (v1.5.0): rules `--init` adds to permissions.allow
-PERMISSION_RULES = (
-    "Bash(python -m n3memorycore.n3memory --search *)",
-    "Bash(python -m n3memorycore.n3memory --buffer *)",
-    "Bash(python -m n3memorycore.n3memory --list*)",
-    "Bash(python -m n3memorycore.n3memory --repair*)",
-    "Bash(python -m n3memorycore.n3memory --stop*)",
-    "Bash(python -m n3memorycore.n3memory --show-turn *)",
-    "Bash(python -m n3memorycore.n3memory --recall-thread *)",
-    "Bash(n3mc --search *)",
-    "Bash(n3mc --buffer *)",
-    "Bash(n3mc --list*)",
-    "Bash(n3mc --repair*)",
-    "Bash(n3mc --stop*)",
-    "Bash(n3mc --show-turn *)",
-    "Bash(n3mc --recall-thread *)",
-)
-
-_OTHER_N3MC_MARKERS = ('n3mc_hook', 'n3mc-hook', 'n3mc_stop_hook', 'n3mc-stop-hook')
-
-
-def _hook_tokens(command: str) -> list:
-    """spec §4: backslashes become "/" first. posix shlex drops an unquoted
-    "\\" as an escape, so C:\\Tools\\n3mc-hook.exe was not recognized (review of
-    2026-11-17). The tokens are only compared, never executed."""
-    import shlex
-    command = command.replace('\\', '/')
-    try:
-        return shlex.split(command, posix=True)
-    except ValueError:
-        return command.split()
-
-
-def is_own_hook(command: str, event: str) -> bool:
-    """spec §4 ① Path B (decision D1): True only for a hook command that runs
-    THIS package's hook — (a) the entry point n3mc-hook / n3mc-stop-hook
-    (.exe ignored, any folder), (b) `-m n3memorycore.n3mc_hook`, or (c)
-    n3mc_hook.py / n3mc_stop_hook.py inside this package's folder."""
-    if event not in _HOOK_EVENTS or not isinstance(command, str):
-        return False
-    exe_name, module = _HOOK_EVENTS[event]
-    toks = _hook_tokens(command)
-    if not toks:
-        return False
-    first = toks[0].replace('\\', '/').rsplit('/', 1)[-1].lower()
-    if first.endswith('.exe'):
-        first = first[:-4]
-    if first == exe_name:
-        return True
-    for i, t in enumerate(toks[:-1]):
-        if t == '-m' and toks[i + 1] == module:
-            return True
-    script = module.split('.')[-1] + '.py'
-    pkg_dir = os.path.normcase(os.path.abspath(_PKG_DIR))
-    for t in toks[1:]:
-        tt = os.path.expanduser(t)
-        if os.path.basename(tt.replace('\\', '/')).lower() == script:
-            d = os.path.normcase(os.path.abspath(os.path.dirname(tt)))
-            if d == pkg_dir:
-                return True
-    return False
-
-
-def _shell_path(p) -> str:
-    """Forward slashes always (bash reads a backslash as an escape). Quote only
-    when the path has a space: a hook command that starts with a quote did not
-    run on a Windows PC (2026-11-15), while a bare path did."""
-    import pathlib
-    s = pathlib.Path(p).as_posix()
-    return f'"{s}"' if ' ' in s else s
-
-
-def _resolve_hook_command(script_name: str) -> str:
-    """Resolve the hook command (spec section 4, resolve_cmd).
-
-    1. The scripts folder of the running Python (normal, then user scheme):
-       found even when PATH is stale, e.g. Python was installed after
-       Claude Code started.
-    2. PATH (shutil.which).
-    3. python -m (unquoted unless the path has a space).
-    """
-    import pathlib
-    folders = [sysconfig.get_path('scripts')]
-    try:
-        folders.append(sysconfig.get_path('scripts', sysconfig.get_preferred_scheme('user')))
-    except (KeyError, ValueError):
-        pass
-    for folder in folders:
-        if not folder:
-            continue
-        for name in (script_name + '.exe', script_name):
-            cand = pathlib.Path(folder) / name
-            if cand.is_file():
-                return _shell_path(cand)
-    exe = shutil.which(script_name)
-    if exe:
-        return _shell_path(exe)
-    module = {
-        'n3mc-hook':      'n3memorycore.n3mc_hook',
-        'n3mc-stop-hook': 'n3memorycore.n3mc_stop_hook',
-    }[script_name]
-    return f'{_shell_path(sys.executable)} -m {module}'
-
-
-def _settings_path() -> str:
-    return os.path.join(os.path.expanduser('~'), '.claude', 'settings.json')
-
-
-def _merge_settings(settings: dict) -> list:
-    """Merge our hooks and the permission rules into `settings` (in place).
-    Returns the report lines about other N3MC hooks that were left alone."""
-    report = []
-    hooks = settings.setdefault('hooks', {})
-    for event, (exe_name, _module) in _HOOK_EVENTS.items():
-        kept = []
-        entries = hooks.get(event, [])
-        if not isinstance(entries, list):
-            raise ValueError(f'hooks.{event} is not a list')
-        for entry in entries:
-            if not isinstance(entry, dict):
-                kept.append(entry)
-                continue
-            inner_all = entry.get('hooks', [])
-            if not isinstance(inner_all, list):
-                kept.append(entry)
-                continue
-            inner = [h for h in inner_all
-                     if not (isinstance(h, dict) and is_own_hook(h.get('command', ''), event))]
-            for h in inner:
-                c = h.get('command', '') if isinstance(h, dict) else ''
-                if isinstance(c, str) and any(m in c for m in _OTHER_N3MC_MARKERS):
-                    report.append(f"Another N3MC hook is registered for {event} "
-                                  f"and was left in place: {c}")
-            if inner:
-                kept.append({**entry, 'hooks': inner})
-        kept.append({'hooks': [{'type': 'command',
-                                'command': _resolve_hook_command(exe_name)}]})
-        hooks[event] = kept
-
-    allow = settings.setdefault('permissions', {}).setdefault('allow', [])
-    for rule in PERMISSION_RULES:
-        if rule not in allow:
-            allow.append(rule)
-    return report
-
 
 def cmd_init() -> int:
     """Set up the data directory and register global Codex hooks."""
@@ -2571,8 +1957,6 @@ def main() -> None:
     grp.add_argument('--show-turn', metavar='TURN_ID', dest='show_turn',
                      help='Print the full text of one exchange')
     grp.add_argument('--stop',   action='store_true')
-    grp.add_argument('--hook-submit',      action='store_true', dest='hook_submit')
-    grp.add_argument('--save-claude-turn', action='store_true', dest='save_claude_turn')
     grp.add_argument('--run-server',       action='store_true', dest='run_server')
     grp.add_argument('--backup', metavar='NEW_DIRECTORY', help='Create a verified SQLite snapshot')
     grp.add_argument('--restore-backup', metavar='DIRECTORY', help='Restore a snapshot to a new home')
@@ -2658,10 +2042,6 @@ def main() -> None:
         cmd_show_turn(args.show_turn, cfg)
     elif args.stop:
         cmd_stop(cfg)
-    elif args.hook_submit:
-        cmd_hook_submit(cfg)
-    elif args.save_claude_turn:
-        cmd_save_claude_turn(cfg)
     else:
         parser.print_help()
 

@@ -32,6 +32,19 @@ def test_codex_turn_pairing(monkeypatch):
     assert all(item[1]['agent_name'] == 'codex' for item in seen)
 
 
+def test_prompt_hook_sends_repair_limit(monkeypatch):
+    posts = []
+    monkeypatch.setattr(n3memory, '_load_config', lambda: {})
+    monkeypatch.setattr(n3memory, 'ensure_server', lambda cfg: True)
+    monkeypatch.setattr(n3memory, '_post',
+                        lambda cfg, path, body=None, **kw: posts.append((path, body)) or {})
+    monkeypatch.setattr(n3memory, '_do_search', lambda *a, **k: None)
+    monkeypatch.setattr(n3memory, '_do_buffer', lambda *a, **k: None)
+    _run(monkeypatch, '--prompt', {'session_id': 'thread-a', 'turn_id': 'turn-1', 'prompt': 'hello'})
+    assert ('/repair', {'max_records': n3memory._HOOK_REPAIR_MAX_RECORDS}) in posts
+    assert n3memory._HOOK_REPAIR_MAX_RECORDS == 200
+
+
 def test_keyword_hit_reaches_codex_stdout_without_embeddings(
     monkeypatch, tmp_path, capsys
 ):

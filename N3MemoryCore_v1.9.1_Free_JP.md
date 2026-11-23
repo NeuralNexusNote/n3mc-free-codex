@@ -141,7 +141,7 @@ from .database import (
 
 ```python
 # n3memorycore/n3memory.py
-from .paths import HOME_DIR, MEMORY_DIR, DB_PATH, PID_FILE, AUDIT_LOG, CONFIG_FILE, NOTICES_FILE, claude_paths
+from .paths import HOME_DIR, MEMORY_DIR, DB_PATH, PID_FILE, AUDIT_LOG, CONFIG_FILE, NOTICES_FILE
 from .core.database import (
     get_connection, init_db, migrate_schema, insert_memory, insert_memory_once,
     check_exact_duplicate, search_vector, find_unindexed_memories,
@@ -149,7 +149,7 @@ from .core.database import (
 )
 from .core.processor import (
     embed_passage, cosine_sim_from_l2, hybrid_search,
-    chunk_text, add_chunk_prefixes, purify_text, render_memory_context,
+    purify_text, render_memory_context,
 )
 ```
 
@@ -179,7 +179,7 @@ from .core.processor import (
 
 #### サーバーの確認と入れ替え（`ensure_server`）
 
-CLI は `/health` の応答を次のように判定する（`_health_decision(health)`。戻り値は `'ok'`・`'stale'`・`'foreign'`・`'legacy'`・`'none'` のどれか）。この確認をするのは、サーバーを使うコマンド（`--buffer`・`--search`・`--repair`・`--hook-submit`・`--save-claude-turn`）だけで、自分の DB を直接読む `--list`・`--recall-thread`・`--show-turn` と、`--stop`・`--init` では行わない:
+CLI は `/health` の応答を次のように判定する（`_health_decision(health)`。戻り値は `'ok'`・`'stale'`・`'foreign'`・`'legacy'`・`'none'` のどれか）。この確認をするのは、サーバーを使うコマンド（`--buffer`・`--search`・`--repair`）と §4 のフックだけで、自分の DB を直接読む `--list`・`--recall-thread`・`--show-turn` と、`--stop`・`--init` では行わない:
 
 | 応答 | 判定 | 動作 |
 |---|---|---|
@@ -217,7 +217,7 @@ CLI は `/health` の応答を次のように判定する（`_health_decision(he
 
 `ensure_server` は False を返し、モジュール変数 `_FOREIGN_SERVER_ROOT` にそのサーバーの `root` を入れ、知らせ `port_conflict` を出す。このとき **記録が別のフォルダの DB に混ざらないように**:
 
-- 保存（フック・`--buffer`・`--save-claude-turn`）は自分の DB に `_buffer_direct` で直接書く（埋め込みは、自分のサーバーが動いたときの `/repair` で付く）。
+- 保存（フック・`--buffer`）は自分の DB に `_buffer_direct` で直接書く（埋め込みは、自分のサーバーが動いたときの `/repair` で付く）。
 - Codex の入力フックは自分の SQLite に対し FTS 検索を行う（§4）。CLI の `--search` はこの状態を次の形式で表示する。 `# Recalled Memory Context\n\n_(memory search unavailable: another N3MC folder's server is using port <port>)_\n`。
 - `--repair` は何もせずに戻り、理由を stderr に 1 行出す。`/repair` も送らない。
 - `--list`・`--recall-thread`・`--show-turn` はもともと自分の DB を直接読むので、そのまま動く。
@@ -234,7 +234,7 @@ CLI は `/health` の応答を次のように判定する（`_health_decision(he
 
 テストでは `NOTICES_FILE` と `AUDIT_LOG` を必ず一時フォルダに向けること（本物の `~/.n3mc` に書かない）。
 - **応答目標**: 0.7s 前後（埋め込み生成 + DB検索の合計）。ハードウェア・OS・モデルキャッシュ状態に依存するため、達成目標として扱い厳密な要件とはしない。
-- **初回起動**: モデルのプリロードを uvicorn 起動前に実行するため、初回に限らず、サーバーの起動には毎回時間がかかる。モデルがキャッシュ済みでも、サーバーを起動する必要があったフックは開発機で 41.2 秒かかった（2026-11-22。サーバーが動いていない状態からの `--hook-submit`。次の呼び出しは 0.9 秒）。モデルがまだキャッシュにないときは、ダウンロードに 2〜10 分かかる。フックは最大 60 秒待ち、そのあとはサーバーなしで進める（上の「PID ファイルの扱い」）。これは仕様上の許容動作であり、その待ちはフックの `"timeout": 120`（§4「フックの制限時間」）に収まる。
+- **初回起動**: モデルのプリロードを uvicorn 起動前に実行するため、初回に限らず、サーバーの起動には毎回時間がかかる。モデルがキャッシュ済みでも、サーバーを起動する必要があったフックは開発機で 41.2 秒かかった（2026-11-22。サーバーが動いていない状態からの入力フック。次の呼び出しは 0.9 秒）。モデルがまだキャッシュにないときは、ダウンロードに 2〜10 分かかる。フックは最大 60 秒待ち、そのあとはサーバーなしで進める（上の「PID ファイルの扱い」）。これは仕様上の許容動作であり、その待ちはフックの `"timeout": 120`（§4「フックの制限時間」）に収まる。
 
 ### SQLite 剛性設定
 接続時に以下を強制実行せよ:
@@ -533,11 +533,11 @@ proc = subprocess.Popen(
 - 切り離しのフラグにより、サーバーを起動したフックのプロセスが終わってもサーバーは動き続ける。
 
 - `-m n3memorycore.n3memory` 形式が必須。これによりパッケージの相対インポートが解決される。サーバーを絶対ファイルパスで起動してはならない。
-- 呼び出し側（settings.json の hooks 等）でリダイレクトを付与する必要はない。
+- 呼び出し側（`hooks.json` のフック等）でリダイレクトを付与する必要はない。
 
 **安全なインポートパス（2026-11-21）**: `python -m <モジュール>` は、今のフォルダを `sys.path` の先頭に置く。フックと §4 のコマンドは、利用者が Codex で開いているフォルダで動く。下の 2 つの決まりがないと、そのフォルダにある、N3MC が import するモジュールと同じ名前のファイル（たとえば、利用者がクローンしたばかりのリポジトリの中の `shlex.py` や `fastapi.py`）が import され、N3MC の中で動く。
 
-**決まり 1 — 入口のモジュールは、今のフォルダを外す。** パッケージの中で、プログラムの入口になりうるモジュール（`if __name__ == "__main__":` で終わるもの。ここでは `n3memory.py`、`n3mc_hook.py`、`n3mc_stop_hook.py`）は、次のブロックを**最初の文**として持つ。docstring の直後、ほかのどの import よりも前に置く（フックのモジュールでは、UTF-8 のブロックをこのあとに置く）。
+**決まり 1 — 入口のモジュールは、今のフォルダを外す。** パッケージの中で、プログラムの入口になりうるモジュール（`python -m` で起動されるもの。ここでは `n3memory.py`）は、次のブロックを**最初の文**として持つ。docstring の直後、ほかのどの import よりも前に置く。フックの入口 `codex_entry.py` は、登録されたコマンドが `python -I` で起動するので（§4）、今のフォルダは `sys.path` に入らない。このブロックは持たない。
 
 ```python
 import os as _os
@@ -581,11 +581,11 @@ def python_cmd():
     return cmd
 ```
 
-子の Python のプロセス（上のコードのサーバーと、フックのモジュールからの呼び出し）は、すべて `[*python_cmd(), '-m', …]` で起動する。`[sys.executable, '-m', …]` で起動してはならない。`-P`（Python 3.11 から）は、今のフォルダを `sys.path` に足すこと自体をやめさせる。今のフォルダに、このパッケージと同じ名前のフォルダがある場合にも効く。
+子の Python のプロセス（上のコードのサーバー）は、すべて `[*python_cmd(), '-m', …]` で起動する。`[sys.executable, '-m', …]` で起動してはならない。`-P`（Python 3.11 から）は、今のフォルダを `sys.path` に足すこと自体をやめさせる。今のフォルダに、このパッケージと同じ名前のフォルダがある場合にも効く。
 
 **この決まりで防げないもの**: 今のフォルダにある、このパッケージ自身と同じ名前（`n3memorycore`）のフォルダやファイル。そのフォルダで `python -m …` と打ってプログラムに入るとき（§4 のコマンドと、`python -m` の形で登録されたフック）は、もう一方のパッケージが import されるので、ブロックに届かない。Python 3.10 では、子プロセスも同じである（`-P` がない）。そのフォルダに置かれた `runpy.py` も動く。コンソールスクリプトから入るか、Python 3.11 以降で `python -P -m …` を使えば、起きない。（2026-11-21 に確認: 今のフォルダに `shlex.py` を置くと、この決まりの前は `python -m n3memorycore.n3memory` がそのファイルを動かし、決まりを入れたあとは動かさない。そこに `n3memorycore/` というフォルダがあれば、今も動く。）
 
-**文字コード（UTF-8）**: `n3memorycore/n3memory.py` の `main()` 先頭、**および `n3memorycore/n3mc_hook.py` と `n3memorycore/n3mc_stop_hook.py` のモジュール先頭**（`sys.stdin.read()` や `subprocess.run` の呼び出しより前）で以下を実行し、Windows cp932 環境での文字化けをプログラム内部で解決せよ。
+**文字コード（UTF-8）**: `n3memorycore/n3memory.py` の `main()` 先頭、**および `n3memorycore/codex_entry.py` の、標準入力を読む前**で以下を実行し、Windows cp932 環境での文字化けをプログラム内部で解決せよ。
 
 ```python
 for _stream_name in ("stdin", "stdout", "stderr"):
@@ -600,7 +600,7 @@ for _stream_name in ("stdin", "stdout", "stderr"):
 - この処理により、呼び出し側が `python -X utf8` を指定する必要はない。
 - `reconfigure` は Python 3.7 以降で利用可能。それ以前の環境は `PYTHONUTF8=1` 環境変数を代替手段とする。
 - 多言語テキスト（日本語・英語・中国語 等）はすべて UTF-8 で統一する。
-- ⚠️ **stdin を読む／stdin を subprocess にパイプするすべての Python エントリポイントで reconfigure ブロックが必須** — `n3memorycore/n3memory.py`、`n3memorycore/n3mc_hook.py`、`n3memorycore/n3mc_stop_hook.py` のいずれか一つでも忘れると、Windows で非 ASCII 入力（日本語、em-dash 等）が静かに mojibake し、その破損バイト列が `audit.log` と DB に永続化されて復元不能になる。フックスクリプトでは `main()` 内ではなく**モジュール先頭**に置くこと（最初の `sys.stdin.read()` より前に走らせるため）。
+- ⚠️ **stdin を読む／stdin を subprocess にパイプするすべての Python エントリポイントで reconfigure ブロックが必須** — `n3memorycore/n3memory.py`、`n3memorycore/codex_entry.py` のどちらか一つでも忘れると、Windows で非 ASCII 入力（日本語、em-dash 等）が静かに mojibake し、その破損バイト列が `audit.log` と DB に永続化されて復元不能になる。フックの入口では、標準入力を最初に読む前に走らせること。
 
 **パスのポータビリティ**: Pythonコード内のファイルパス構築はすべて `os.path.join()` または `pathlib.Path` を使用すること。パス区切り文字（`\` や `/` の文字列リテラルによるパス構築）の直接使用は禁止する。本システムはコード変更なしに Windows・Linux で動作しなければならない。
 
@@ -651,7 +651,7 @@ db_path = base_dir + "\\data\\memory.db" # NG
 | `min_score`, `vector_min_cos`, `relative_min_score_ratio`, `version_sim_threshold`, `reply_sim_alpha`, `reply_sim_floor` | 数値 | 0〜1 |
 | `reply_sim_span` | 数値 | > 0 |
 
-- 「整数」は JSON の整数（`2000`）のこと。`2000.0` のような float は、値が整数であっても**受け付けない**。これらのキーはスライスの境界や件数として使われる（`user_text[:search_query_max_chars]`）。v1.4.0 は `2000.0` を受け付け、そのあと `--hook-submit` はすべて検索の前に `TypeError` で失敗し、ユーザーのメッセージは DB に届かなかった（`audit.log` にしか残らなかった）。負の `server_port` や `half_life_days: 0` も v1.4.0 の確認を通っていた。
+- 「整数」は JSON の整数（`2000`）のこと。`2000.0` のような float は、値が整数であっても**受け付けない**。これらのキーはスライスの境界や件数として使われる（`user_text[:search_query_max_chars]`）。v1.4.0 は `2000.0` を受け付け、そのあと入力フックはすべて検索の前に `TypeError` で失敗し、ユーザーのメッセージは DB に届かなかった（`audit.log` にしか残らなかった）。負の `server_port` や `half_life_days: 0` も v1.4.0 の確認を通っていた。
 - 範囲外の値は型の違う値とまったく同じに扱う: そのキーだけ既定値を使い、知らせ `config_type` にそのキーを出す。
 - **`search_result_limit` の上限が 1365 である理由（2026-11-18 の最終レビュー、C-06）**: 参照コードのベクトル検索は、sqlite-vec に `k = 3 × search_result_limit` 件の近傍を求める。sqlite-vec は 4,096 を超える `k` を断る。1366 以上では、ベクトル検索が毎回何も返さず（sqlite-vec の「k value in knn query too large」。ログに警告が出るだけ）、検索はキーワードの一致だけで続いていた。3 × 1365 = 4,095 が、動く最大の値である。
 
@@ -685,7 +685,7 @@ db_path = base_dir + "\\data\\memory.db" # NG
 
 **埋め込みの間は書き込みのロックを持たない（2026-11-18 の最終レビュー、F11）**：ベクトルの修復は、バッチ全体の埋め込みを先に、トランザクションの外で計算し（開いているものは先にコミットする）、そのあとでバッチの `memories_vec` / `memories_fts` / `memories_fts_bi` の行を入れてコミットする — `--reembed` と同じ順序。（それまでは、最初の `INSERT … memories_vec` が書き込みのトランザクションを開き、バッチの残り — 最大 200 件 — を埋め込む間ずっと開いたままだった。その間に届いた `/buffer` は busy timeout まで待って `database is locked` で失敗し、`_buffer_direct` への切り替えも同じく失敗して、質問が保存されなかった。60 件と、1 件 0.25 秒の代役のモデルで再現した。）**書き込む前にもう一度確かめる（2026-11-20）**: 埋め込みのあと、`BEGIN IMMEDIATE` で書き込みのロックを取ってから、バッチの行ごとに、`memories` の行がまだあって同じ記録であること（`id` か `content` が同じ）、`memories_fts` / `memories_fts_bi` / `memories_vec` にその rowid の行がまだないことを確かめ、足りないものだけを書く。ほかの呼び出し（別のウィンドウのフック、手動の `--repair`）が埋め終えた行や、消された行は飛ばす。（それまでは、2 つの呼び出しが同じ未修復の行を読むと、あとの方が `UNIQUE constraint failed on memories_vec primary key` で止まった（2026-11-20、N3MC Pro の生成コードのレビューで再現）。）
 
-**フックからの呼び出しごとの上限（v1.5.0）**: `/repair` は省略可能な本文 `{"max_records": int}` を受け付ける。`--hook-submit` は `{"max_records": 200}`（1 バッチ）を送る。これにより、大量の未処理分（例: 別のフォルダのサーバーがポートを使っていた間に `_buffer_direct` で保存された多数の記録）は、1 つの質問を何分も止めるのではなく、1 ターンに 1 バッチずつ片付けられる。`n3mc --repair` は上限を送らず、すべてを処理する。一回限りのマイグレーション（FTS 句読点クリーニング、ベクトル再インデックス）も同じ上限に従い、マーカーはマイグレーションが終わったときにだけ書く。
+**フックからの呼び出しごとの上限（v1.5.0）**: `/repair` は省略可能な本文 `{"max_records": int}` を受け付ける。入力フックは `{"max_records": 200}`（1 バッチ）を送る。これにより、大量の未処理分（例: 別のフォルダのサーバーがポートを使っていた間に `_buffer_direct` で保存された多数の記録）は、1 つの質問を何分も止めるのではなく、1 ターンに 1 バッチずつ片付けられる。`n3mc --repair` は上限を送らず、すべてを処理する。一回限りのマイグレーション（FTS 句読点クリーニング、ベクトル再インデックス）も同じ上限に従い、マーカーはマイグレーションが終わったときにだけ書く。
 
 ただし **FTS 句読点クリーニング**は、処理した行も結果から消えない（UPDATE するだけ）ため、`OFFSET 0` では終わらない。こちらは `WHERE rowid > <前のバッチの最後の rowid> ORDER BY rowid LIMIT 200` のキーセット方式で進める。**続きから始める（2026-11-20）**: 終えた最後の rowid を `meta` のキー `fts_punct_cursor` に、各回の書き直しと同じトランザクションで書く。次の呼び出しは rowid 0 からではなく、その次から始める（`max_records` 付きの呼び出しが続いても、プロセスを起動し直しても進む）。最後まで読み終えたら `fts_punct_cleaned` を書き、`fts_punct_cursor` を消す。（それまでは、上限付きの呼び出しが毎回 rowid 0 から始まり、201 行目に届かず、マーカーも書かれなかった（2026-11-20、N3MC Pro の生成コードのレビューで再現）。）
 
@@ -790,8 +790,6 @@ python -m n3memorycore.n3memory --recall-thread <turn_id> [--before N] [--after 
 | `--show-turn TURN_ID` | 指定ターンの全文をローカル時刻付きで標準出力に表示。 |
 | `--stop` | 古い一時マーカーと監査ログの後処理。サーバー停止は §3 の `POST /shutdown` が担当する。 |
 | `--run-server` | `config.json` を使いサーバーをフォアグラウンドで起動する。既定 `127.0.0.1:18520`。 |
-| `--hook-submit` | 旧ホスト互換。標準入力の JSON から `prompt` または `message` を読み、検索結果を Markdown で返す。Codex は §4 の `n3mc-hook` を使う。 |
-| `--save-claude-turn` | 旧ホスト互換。標準入力 JSON の `last_assistant_message` を保存。Codex は §4 の `n3mc-stop-hook` を使う。 |
 | `--backup NEW_DIRECTORY` | 未作成の出力先にオンライン SQLite スナップショット、設定、ハッシュ付きマニフェストを作る。`path` と `records` を JSON で返す。 |
 | `--restore-backup DIRECTORY --to-home NEW_DIRECTORY` | バックアップのハッシュと DB を検証して、未作成のデータ先に復元する。`path` と `records` を JSON で返す。 |
 | `--export-records NEW_FILE` | 未作成のファイルに本文・来歴・履歴状態・索引メタデータを JSONL で書き、`path` を JSON で返す。 |
@@ -822,8 +820,8 @@ CLI は FastAPI サーバーへ HTTP リクエストを送信する。全エン�
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | （内部死活監視） | `{"status": "ok", "root", "code_version", "pid"}` を返す（§3「サーバーの名乗り」） |
 | `POST` | `/buffer` | `--buffer`、フック | 本文 `{"content": str, "agent_name": str?, "local_id": str?, "session_id": str?, "turn_id": str?}`（`local_id` 省略時 → `config.json`、`session_id` 省略時 → サーバーのセッション。§3「識別子」。CLI は `N3MC_SESSION_ID` があれば送る）。保存する |
-| `POST` | `/search` | `--search`、`--hook-submit` | 本文 `{"query": str, "session_id": str?, "since": str?, "until": str?}`。`since` / `until` は CLI と同じ規則で解釈する（§3.6）。読めない値には 400 を返す。結果を返す |
-| `POST` | `/repair` | `--repair`、`--hook-submit` | 本文は省略可: `{"max_records": int?}`（§3.5「マイグレーションのバッチ処理」）。未インデックスレコードを修復 |
+| `POST` | `/search` | `--search`、入力フック | 本文 `{"query": str, "session_id": str?, "since": str?, "until": str?}`。`since` / `until` は CLI と同じ規則で解釈する（§3.6）。読めない値には 400 を返す。結果を返す |
+| `POST` | `/repair` | `--repair`、入力フック | 本文は省略可: `{"max_records": int?}`（§3.5「マイグレーションのバッチ処理」）。未インデックスレコードを修復 |
 | `GET` | `/list` | （対応する CLI コマンドなし） | 全レコードの一覧を返す（各レコードに `agent_name` を含む）。API クライアントのために残している。`--list`・`--recall-thread`・`--show-turn` は DB を直接読み、これを呼ばない |
 | `POST` | `/shutdown` | （内部、サーバーの入れ替え） | 本文 `{"root": str}`。`root` が自分の `root` と同じときだけ終了する。違えば 403（§3） |
 | `DELETE` | `/delete/{id}` | — | **Pro のみ。** Free は常に 403（`{"detail": "Pro feature"}`）を返す |
@@ -1018,7 +1016,7 @@ n3mc-free/
     ├── test_dedup_concurrent.py # Layer 1: 同じターンの同じ文を同時に 2 回保存する（R04。モデル不要）
     ├── test_processor.py    # Layer 2: ランキング数学、purify `[code omitted]` 置換検証、Refresh
     ├── test_api.py          # Layer 3: FastAPIエンドポイントテスト（TestClient）
-    ├── test_hooks.py        # Layer 4: フック統合（完全保存チャンク化、画像除去、監査ログ）
+    ├── test_hooks.py        # Layer 4: フック統合（完全保存チャンク化、監査ログ）
     ├── test_hooks_encoding.py # サロゲート除去・UTF-8 の回帰テスト
     ├── test_regressions.py  # Layer 5: v1.4.0〜v1.6.0 の修正の回帰テスト（モデル不要）
     ├── test_search_port_2026_11_17.py # Layer 5: 日本語の FTS、バイグラムの索引、システムの入力を飛ばす、返答との近さの並べ直し
@@ -1026,9 +1024,9 @@ n3mc-free/
     └── test_index_meta.py             # Layer 5: meta 表、モデルの食い違いの通知、--reembed（v1.8.0。モデル不要）
 ```
 
-**本物のデータを守る（必須）**: `conftest.py` に autouse の fixture を置き、`n3memory` モジュールの `HOME_DIR`・`MEMORY_DIR`・`DB_PATH`・`PID_FILE`・`AUDIT_LOG`・`NOTICES_FILE`・`CONFIG_FILE`・`TURN_ID_FILE`・`SERVER_LOG` とサーバー起動のマーカー — **およびフックのモジュール**（`n3mc_hook`・`n3mc_stop_hook`）**の `AUDIT_LOG`** — を一時フォルダに向け、`--init` が使うユーザーの `~/.Codex/settings.json` を一時ファイルに向け（例: テストで `HOME` / `USERPROFILE` を設定する）、`_request_shutdown` と HTTP の送信（`_post`・`_get`）を本物のサーバーに届かない偽物に差し替えること。テストが本物の `~/.n3mc` の `notices.json`・`audit.log` に書いたり、本物のサーバー（18520）に `/shutdown` を送ったりしてはならない。
+**本物のデータを守る（必須）**: `conftest.py` に autouse の fixture を置き、`n3memory` モジュールの `HOME_DIR`・`MEMORY_DIR`・`DB_PATH`・`PID_FILE`・`AUDIT_LOG`・`NOTICES_FILE`・`CONFIG_FILE`・`SERVER_LOG` とサーバー起動のマーカーを一時フォルダに向け、`--init` が使う `hooks.json` を `N3MC_CODEX_HOOKS_PATH` で一時ファイルに向け、`_request_shutdown` と HTTP の送信（`_post`・`_get`）を本物のサーバーに届かない偽物に差し替えること。テストが本物の `~/.n3mc` の `notices.json`・`audit.log` に書いたり、本物のサーバー（18520）に `/shutdown` を送ったりしてはならない。
 
-Codex 版では `N3MC_CODEX_HOOKS_PATH` を一時 `hooks.json` に向け、`codex_entry.MEMORY_DIR` も試験用に差し替える。以下の旧ホストのテスト名・件数は回帰項目の参照用。Codex の入口は `tests/test_codex_integration.py` で試験する。独立した `test_safe_path.py` がない場合は、登録コマンドを別フォルダから実行して安全なインポートを確認する。
+Codex 版では `N3MC_CODEX_HOOKS_PATH` を一時 `hooks.json` に向け、`codex_entry.MEMORY_DIR` も試験用に差し替える。以下のテスト名は回帰項目の参照用。Codex の入口は `tests/test_codex_integration.py` で試験する。独立した `test_safe_path.py` がない場合は、登録コマンドを別フォルダから実行して安全なインポートを確認する。
  **HOME を差し替えると Hugging Face のキャッシュの場所も変わり、`TestEmbedding` などが埋め込みモデル（約 470 MB）をテストごとに一時フォルダへダウンロードし直す。** fixture で `HF_HOME` を、差し替える前の本物のキャッシュ（`HF_HOME` が設定済みならその値、なければ `~/.cache/huggingface`）に固定すること。
 
 標準的なフィクスチャインポート:
@@ -1086,13 +1084,11 @@ python -m pytest tests/ -v
 | `TestGC` | `gc_returns_403`, `gc_detail_is_pro` | Pro 専用エンドポイント → 403 |
 | `TestImport` | `import_returns_403`, `import_with_data_returns_403`, `import_detail_is_pro` | Pro 専用エンドポイント → 403 |
 
-### Layer 4: `test_hooks.py`（21テスト）と `test_hooks_encoding.py`（10テスト）
+### Layer 4: `test_hooks.py`（13テスト）と `test_hooks_encoding.py`（10テスト）
 
 | テストクラス | テスト内容 | カバレッジ |
 |---|---|---|
 | `TestChunkText` | `short_text_single_record`, `long_text_multiple_chunks`, `prefixes_numbered`, `single_chunk_no_number`, `paragraph_split`, `hard_window_fallback` | 完全保存チャンク化 |
-| `TestStripImages` | `plain_text_unchanged`, `base64_image_stripped`, `image_only_payload_returns_empty` | 画像ペイロード除去 |
-| `TestExtractText` | `plain_string`, `multimodal_json_list`, `image_only_empty`, `empty_input`, `json_text_is_kept_as_typed` | マルチモーダル抽出。JSON として読める入力をマルチモーダルの配列として扱わない |
 | `TestCompleteRecording` | `short_claude_response_saved`, `short_user_message_saved`, `skip_pattern_abolished`, `code_block_replaced_in_purify`, `inline_code_preserved_in_purify` | 完全記録契約（フィルタ廃止） |
 | `TestStopIdempotency` | Codex の Stop | Codex の Stop を繰り返し実行してもプロジェクトの `AGENTS.md` は変更されず、記録は重複しないことを確認する。 |
 | `TestSanitizerUnit` | `strips_lone_high_surrogate`, `strips_lone_low_surrogate`, `clean_japanese_unchanged`, `complete_emoji_pair_preserved`, `recursive_dict`, `recursive_list`, `none_passthrough` | サロゲート除去（`test_hooks_encoding.py`） |
@@ -1110,19 +1106,19 @@ python -m pytest tests/ -v
 | `TestFtsQuoting` | `\ / # = @ * $ %`・`AND/OR/NOT`・`"`・制御文字を含むクエリで例外にならない、記号を含む語がヒットする、`search_fts` が例外を出しても `hybrid_search` が続く。**v1.5.0**: 語を `OR` でつなぐ（文のようなクエリが、その語の一部だけを含む記録にヒットする）、3 文字未満の語（`AI`、`東京`）は捨て、そういう語だけのクエリは FTS を飛ばす、クエリの句読点で語が分かれる（`「アルファ9」の気温は？` が `架空の惑星「アルファ9」の気温設定` にヒットする）。**2026-11-17**: 最大 40 語、CJK を含む 4 文字以上の語は 3 文字ずつに分ける |
 | `test_search_port_2026_11_17.py`（2026-11-17） | 空白のない日本語の文が、その語を含む記録に当たる。ひらがなだけの 3 文字を捨てる。記号だけ・2 文字だけの質問で例外にならない。`bigram_text('N3MCの設定')` が `N3MC の設 設定`。`記憶` と `PR` がバイグラムの索引で（`hybrid_search` でも）当たる。バイグラムの検索が失敗しても trigram の結果が残る。`delete_memory` のあとバイグラムの行が残らない。`--repair` が古い DB のバイグラムの行を 1 回だけ埋める（2 回動かしても 1 記録 1 行）。`<agent-message from=...>` と `<system-reminder>` の入力は保存も検索もせず `turn_id` を変えない。`<agent-message` や `<div>` で始まるユーザーの質問は飛ばさない。返答との近さの並べ直しは既定で off、on なら返答の近い往復が上に来る、DB のエラーでは入力をそのまま返す |
 | `test_index_meta.py`（v1.8.0） | （2026-11-22）`memories_vec` を `float[384]` で作り直し、`meta` の 3 行を消したあと、384 次元の代わりのモデルで `--reembed` が成功し、ベクトルの件数が記録の件数と一致し、`embed_dim` が 384 になる。次元が本当に違うモデルでは何も変えず exit 1。`init_db` が `meta` を作る。`/repair` が `fts_punct_cleaned` / `fts_bigram` / `embed_model` / `embed_dim` を書く。v1.7.0 の印のファイルの隣に戻した古いデータベース（`meta` のキーなし）でバイグラム索引が埋まる。`embed_model` を `vec_model.txt` から取るのはベクトルがあるときだけ。食い違いで `embed_model_mismatch` が出て、一致で消える。`--reembed` がすべてのベクトルを設定のモデルのものに替え、`embed_model` を書き、通知を消し、`reembed_cursor` から再開し、次元の違うモデルは何も変えずに断る |
-| `test_review_2026_11_17.py`（2026-11-17） | どのチャンクも `max_chars` を超えない（段落と文の経路、`max_chars` が 400 と小さい値、日本語の文）。`chunk_text('x' * 10 + '\n\n' + 'y' * 400)` は 410 個の文字（`x` と `y`）をすべて残し、400 字以下のチャンクを返す。`is_own_hook` は、引用符なしで `\` 区切りの `C:\Tools\n3mc-hook.exe` と `C:\Tools\n3mc-stop-hook.exe` を自分のフックと認識し、`--init` はそのエントリを足さずに置き換える |
+| `test_review_2026_11_17.py`（2026-11-17） | どのチャンクも `max_chars` を超えない（段落と文の経路、`max_chars` が 400 と小さい値、日本語の文）。`chunk_text('x' * 10 + '\n\n' + 'y' * 400)` は 410 個の文字（`x` と `y`）をすべて残し、400 字以下のチャンクを返す。 |
+ |
 | `TestVectorFilter` | `since` 付きの検索で範囲内の記録が KNN の上位外にあっても返る、`rowid IN` が使えないときに全件計算に切り替わる |
 | `TestNoSimilarityDedup` | 似た分割（cos ≥ 0.95）がすべて保存される、同じ `turn_id` の完全一致は飛ばす、別の `turn_id` の完全一致は保存する、`turn_id` なしは全体で完全一致を飛ばす |
 | `TestSearchShaping` | `vector_min_cos` 未満の候補を捨てる、相対の足切り、`_version_group` は足切りで落ちない、新しい版が上に来る、同じ content の集約、`pair_top_n`・`pair_max_chars` と `pairs_omitted`。**v1.5.0**: 類似度の低い現在のセッションの記録があっても、類似度の高い 30 日前の別セッションの記録が相対の足切りで残る、別セッションのキーワードのみのヒットが `min_score` で残る、並びは今も最終スコア順（現在のセッションが先）。**v1.6.0**: 類似度の高い 400 日前の記録が、ほかに候補がなくても返る（`min_score` と相対の足切りは `time_decay` を見ない）、同じ類似度の新しい記録と 400 日前の記録が両方返り、新しいほうが上に来る |
 | `TestRender` | `saved=` がローカル時刻、版の一文、省略の行に `--show-turn`、知らせが先頭に出る。**v1.6.0**: 弱い候補が Top matches の後、Q-A の往復の前に `## Possibly related (weak matches — may be unrelated)` の下に出て、番号は Top matches から続く、Top matches が 0 件なら `_No relevant memories found._` の後に弱い候補の見出しが出る（行は `[1]` から）、弱い候補がなければその見出しは出ない |
 | `TestNoContextFile` | `--search` が `memory_context.md` を作らず、Codex の Stop がプロジェクト指針を変更しないことを確認する。 |
-| `TestBehaviorMd` | 目印が同じなら触れない、過去のひな形なら控えを取って置き換える（**v1.6.0**: `v2` のひな形、ハッシュ `5af3c015c06c62c1` も含む。新しいファイルの 1 行目は `<!-- n3mc-behavior v3 -->` で、Weak Matches の節がある）、手で編集したものは置き換えず知らせを出す。**v1.5.0**: 知らせのキーにパスのハッシュが入り、メッセージにパスが入る、手で編集したファイルが 2 つあれば知らせも 2 つ、ファイルの 1 行目が今の目印になったら知らせが消える |
 | `TestServerDecision` | 正常／`code_version` 違い／別のフォルダ／`root` なしで確かめられない、`/shutdown` を先に使う、`root` が違えば 403、死んだ PID ファイルは待たない。**2026-11-20**: PID ファイルのサーバーが別のポートで待ち受けていて、その `/health` がこのフォルダを返すときは、そのポートに `/shutdown` を送り、60 秒待たずに新しいサーバーを起動する。別の `root` を返すポートには `/shutdown` を送らない。`Host` の確認は、いまの `config.json` ではなく、サーバーが待ち受けているポートを使う |
 | `TestServerStart`（v1.5.0） | 待っている間に終了した子プロセスでは待つのをすぐやめ、`server.log` を示す `server_start_failed` を出す、失敗から 5 分以内は新たに起動しない、あとで起動に成功したら知らせとマーカーが消える、60 秒たってもまだ起動中の PID ファイルのプロセスは入れ替えも重複起動もしない、`Popen` にプラットフォームに応じた切り離しのフラグが渡り stderr が `server.log` に行く（プロセスの作成は偽物に差し替え）、（2026-11-22）PID ファイルもサーバーもない状態で同時に始めた 2 つの `ensure_server` は `Popen` を 1 回だけ呼ぶ、予約した側の `Popen` が例外を出すと予約は消え、あとの呼び出しが起動できる、負けた側は PID ファイルを書き換えない、60 秒未満の空の PID ファイルは起動中とみなす |
-| `TestServerApi`（v1.5.0） | `Host: evil.example` のリクエストはどのエンドポイントでも 403、`127.0.0.1:<port>` と `localhost:<port>` は通る、`/buffer`・`/search`・`/repair`・`/list` は普通の `def` 関数、`{"max_records": 200}` 付きの `/repair` は最大 200 件しか処理せず、`--hook-submit` はその上限を送る。`HTTP_PROXY` を別のローカルのサーバーに向けても、`_get` は N3MC のサーバーに届き、プロキシには何も届かない（F16）。**v1.9.1**: `Origin: http://evil.example` のリクエストと `Origin: null` のリクエストは、`Host: 127.0.0.1:<port>` でも、どのエンドポイントでも 403。同じリクエストから `Origin` を外すと通る。`_post` と `_get` が送るリクエストには `Origin` ヘッダーがない |
+| `TestServerApi`（v1.5.0） | `Host: evil.example` のリクエストはどのエンドポイントでも 403、`127.0.0.1:<port>` と `localhost:<port>` は通る、`/buffer`・`/search`・`/repair`・`/list` は普通の `def` 関数、`{"max_records": 200}` 付きの `/repair` は最大 200 件しか処理しない（入力フックがその上限を送ることは `test_codex_integration.py` で確かめる）。`HTTP_PROXY` を別のローカルのサーバーに向けても、`_get` は N3MC のサーバーに届き、プロキシには何も届かない（F16）。**v1.9.1**: `Origin: http://evil.example` のリクエストと `Origin: null` のリクエストは、`Host: 127.0.0.1:<port>` でも、どのエンドポイントでも 403。同じリクエストから `Origin` を外すと通る。`_post` と `_get` が送るリクエストには `Origin` ヘッダーがない |
 | `TestForeignServer` | 別のフォルダのサーバーのとき、保存は自分の DB に直接、検索はしない、`--repair` は何もしない |
 | `TestConfig` | 読めない `config.json` を上書きしない、型の違う項目だけ無視、直したら知らせが消える、`config.json` の中身が変わったときだけ `code_version` が変わる。**v1.5.0**: `search_query_max_chars` の `2000.0`、`half_life_days` の `0`、`server_port` の `70000` / `-1`、`min_score` の `1.5` は `config_type` 付きで無視される（**v1.6.0**: `min_results` の `-1` と `1.5` も同じ。`0` は受け付ける。**C-06**: `search_result_limit` の `1366` も `config_type` で無視し、`1365` は受け付ける。`k = 4095` のベクトル検索は動く）、ないファイルは排他作成で作り、同時に作った別のプロセスのファイルは上書きせず読む（`owner_id` は 1 つ）、更新は一時ファイルと `os.replace` を通す、（2026-11-22）ID のない既存の `config.json`（DB は空）から同時に始めた 2 つのプロセスは、どちらもディスクの `owner_id` / `local_id` で終わり、利用者の設定は残る、何も変えなければサーバーの `code_version` はクライアントと一致し（キーを補って書いたあとも）、サーバーが読んだ直後に `config.json` を変えるとサーバーは `stale`、再起動後に新しい設定で `ok` |
-| `TestHookSubmit` | Codex 入口がシステム入力を除外し、`session_id` と `turn_id` を使って保存し、トランスクリプトを再読込しないことを確認する。旧 CLI のトランスクリプト処理には別の互換テストがある。 |
+| `test_codex_integration.py`・`TestSystemInputsSkipped` | Codex 入口がシステム入力を除外し、`session_id` と `turn_id` を使って保存し、トランスクリプトを再読込しないことを確認する。 |
 | `TestPurifyBeforeChunk`（v1.5.0） | 2 つのコードブロックとその間の文章を持つ 500 字を超えるユーザー発言で、文章は残り、どちらのコードブロックも保存されない、400 字より長いコードブロックは保存されず置き換えられる |
 | `TestChunkSentences`（v1.5.0） | 空行のない日本語の文章が、文の途中ではなく `。` / `！` / `？` のあとで分かれる |
 | `TestTimeBounds`（v1.5.0） | 日付だけの `--since` はローカルの 0 時を UTC に直したもの（UTC 以外の固定のタイムゾーンで）、オフセット付きの値はそのオフセットを守る、`T` と空白の区切りで同じ境界になる、`yesterday` はエラーの行を出して終了ステータス 2、`since > until` はエラー |
