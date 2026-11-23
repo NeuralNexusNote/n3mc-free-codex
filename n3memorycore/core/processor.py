@@ -423,6 +423,8 @@ def hybrid_search(
     current_session_id: Optional[str] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
+    *,
+    keyword_only: bool = False,
 ) -> dict:
     half_life = config.get('half_life_days', 90)
     bm25_min = config.get('bm25_min_threshold', 0.1)
@@ -439,7 +441,7 @@ def hybrid_search(
     if not query.strip():
         return {'results': [], 'pairs': {}, 'pairs_omitted': {}}
 
-    conn = get_connection(db_path)
+    conn = get_connection(db_path, read_only=True) if keyword_only else get_connection(db_path)
     try:
         # Keep ranking, provenance and paired evidence on one SQLite snapshot.
         conn.execute('BEGIN')
@@ -448,32 +450,32 @@ def hybrid_search(
         vec_results = {}
         vec_low = {}
         q_vec = None
-        try:
-            if not embedding_index_compatible(conn, config.get('embed_model') or DEFAULT_EMBED_MODEL):
-                raise RuntimeError('index model differs or reembedding is incomplete; run --reembed')
-            q_vec = embed_query(query)
-            if since or until:
-                rows = search_vector_with_filter(conn, q_vec, k=limit * 3,
-                                                 since=since, until=until)
-            else:
-                rows = search_vector(conn, q_vec, k=limit * 3)
-            for row in rows:
-                cs = cosine_sim_from_l2(row['distance'])
-                (vec_low if cs < min_cos else vec_results)[row['id']] = {
-                    'id':         row['id'],
-                    'content':    row['content'],
-                    'timestamp':  row['timestamp'],
-                    'session_id': row['session_id'],
-                    'turn_id':    row['turn_id'],
-                    'agent_name': row['agent_name'],
-                    'cos_sim':    cs,
-                }
-        except Exception as e:
-            # spec §5: warn on stderr; continue with BM25 only
-            print(
-                f"Warning: vector search degraded (embed_query failed: {e})",
-                file=sys.stderr,
-            )
+        if not keyword_only:
+            try:
+                if not embedding_index_compatible(conn, config.get('embed_model') or DEFAULT_EMBED_MODEL):
+                    raise RuntimeError('index model differs or reembedding is incomplete; run --reembed')
+                q_vec = embed_query(query)
+                if since or until:
+                    rows = search_vector_with_filter(conn, q_vec, k=limit * 3,
+                                                     since=since, until=until)
+                else:
+                    rows = search_vector(conn, q_vec, k=limit * 3)
+                for row in rows:
+                    cs = cosine_sim_from_l2(row['distance'])
+                    (vec_low if cs < min_cos else vec_results)[row['id']] = {
+                        'id':         row['id'],
+                        'content':    row['content'],
+                        'timestamp':  row['timestamp'],
+                        'session_id': row['session_id'],
+                        'turn_id':    row['turn_id'],
+                        'agent_name': row['agent_name'],
+                        'cos_sim':    cs,
+                    }
+            except Exception as e:
+                print(
+                    f"Warning: vector search degraded (embed_query failed: {e})",
+                    file=sys.stderr,
+                )
 
         # A conservative semantic-only rescue: require both an absolute floor
         # and separation from the next distinct turn, not the next chunk.
@@ -493,9 +495,11 @@ def hybrid_search(
 
         # 2. FTS search — an FTS failure must not fail the whole search
         fts_results = {}
+        trigram_error = None
         try:
+            options = {'raise_on_error': True} if keyword_only else {}
             rows = search_fts(conn, query, limit=limit * 3,
-                              since=since, until=until)
+                              since=since, until=until, **options)
             for row in rows:
                 fts_results[row['id']] = {
                     'id':         row['id'],
@@ -507,6 +511,7 @@ def hybrid_search(
                     'bm25_score': row['bm25_score'],
                 }
         except Exception as e:
+            trigram_error = e
             logger.warning(f"FTS search error (continuing with vectors): {e}")
 
         # keyword_relevance per index (bm25 is normalized by each index's own
@@ -522,6 +527,8 @@ def hybrid_search(
             bi_rows = search_fts_bigram(conn, query, limit=limit * 3,
                                         since=since, until=until)
         except Exception as e:
+            if keyword_only and trigram_error is not None:
+                raise RuntimeError('both local keyword indexes are unavailable') from e
             logger.warning(f"Bigram FTS search error (continuing): {e}")
             bi_rows = []
         bi_max_abs = max((abs(r['bm25_score']) for r in bi_rows), default=0.0)
@@ -599,7 +606,7 @@ def hybrid_search(
             )
 
         # 4. Newest version of the same content first
-        if scored and config.get('version_order_enabled', True):
+        if scored and not keyword_only and config.get('version_order_enabled', True):
             try:
                 scored = _order_versions_newest_first(conn, scored, config)
             except Exception as e:

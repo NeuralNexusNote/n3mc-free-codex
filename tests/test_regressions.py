@@ -1491,6 +1491,10 @@ PRO_HOOK = 'python "C:/N3MC-Pro_X/N3MemoryCore/n3mc_hook.py"'
 
 
 class TestInit:
+    @staticmethod
+    def expected_command(flag):
+        return f'C:/fake/Python/python.exe -I -m n3memorycore.codex_entry {flag}'
+
     @pytest.fixture
     def settings(self, tmp_path, monkeypatch):
         path = tmp_path / 'codex' / 'hooks.json'
@@ -1511,8 +1515,8 @@ class TestInit:
         cmds = [h['command'] for e in data['hooks']['UserPromptSubmit'] for h in e['hooks']]
         assert PRO_HOOK in cmds
         assert self.own_cmds(data, 'UserPromptSubmit') == [
-            'C:/fake/Python/python.exe -m n3memorycore.codex_entry --prompt']
-        assert 'Review and trust both hooks' in capsys.readouterr().out
+            self.expected_command('--prompt')]
+        assert '/hooks' in capsys.readouterr().out
 
     def test_own_forms_replaced_not_duplicated(self, settings):
         old = ['C:/old/python.exe -m n3memorycore.codex_entry --prompt',
@@ -1525,9 +1529,9 @@ class TestInit:
         assert n3memory.cmd_init() == 0
         data = json.loads(settings.read_text(encoding='utf-8'))
         assert self.own_cmds(data, 'UserPromptSubmit') == [
-            'C:/fake/Python/python.exe -m n3memorycore.codex_entry --prompt']
+            self.expected_command('--prompt')]
         assert self.own_cmds(data, 'Stop') == [
-            'C:/fake/Python/python.exe -m n3memorycore.codex_entry --stop']
+            self.expected_command('--stop')]
         assert len(data['hooks']['UserPromptSubmit']) == 1
 
     def test_rerun_writes_nothing(self, settings, capsys):

@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "n3memorycore-free"
-version = "1.9.0"
+name = "n3memorycore-free-codex"
+version = "1.9.1"
 description = "Persistent hybrid-search memory store for Codex (Free Edition)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     { name = "N3MemoryCore contributors" },
 ]
@@ -16,7 +17,6 @@ keywords = ["codex", "memory", "rag", "embedding", "sqlite-vec"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
@@ -47,8 +47,8 @@ n3mc-hook      = "n3memorycore.codex_entry:prompt_main"
 n3mc-stop-hook = "n3memorycore.codex_entry:stop_main"
 
 [project.urls]
-Homepage = "https://github.com/NeuralNexusNote/n3mc-free"
-Issues   = "https://github.com/NeuralNexusNote/n3mc-free/issues"
+Homepage = "https://github.com/NeuralNexusNote/n3mc-free-codex"
+Issues   = "https://github.com/NeuralNexusNote/n3mc-free-codex/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

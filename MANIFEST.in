@@ -1,0 +1,3 @@
+include LICENSE NOTICE CHANGELOG.md README_JP.md PHILOSOPHY.md SECURITY.md
+include N3MemoryCore_v1.9.1_Free_JP.md N3MemoryCore_v1.9.1_Free_EN.md
+recursive-include tests *.py

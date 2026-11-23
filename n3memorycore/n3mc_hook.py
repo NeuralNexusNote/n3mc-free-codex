@@ -1,4 +1,13 @@
 import sys
+import os
+
+# Keep checkout execution working and exclude unrelated working directories
+# before importing the modules used by this entry point.
+if __name__ == '__main__' and sys.path:
+    here = os.path.normcase(os.path.realpath(os.getcwd()))
+    checkout = os.path.normcase(os.path.realpath(os.path.dirname(os.path.dirname(__file__))))
+    if here != checkout and os.path.normcase(os.path.realpath(sys.path[0])) == here:
+        del sys.path[0]
 
 # spec §3: reconfigure streams to UTF-8 at module top — before any stdin read
 for _s_name in ("stdin", "stdout", "stderr"):
@@ -10,11 +19,10 @@ for _s_name in ("stdin", "stdout", "stderr"):
             pass
 
 import json
-import os
 import subprocess
 from datetime import datetime, timezone
 
-from .paths import MEMORY_DIR, AUDIT_LOG
+from .paths import MEMORY_DIR, AUDIT_LOG, python_cmd
 
 
 def _write_audit(hook: str, raw: str, payload: dict) -> None:
@@ -47,7 +55,7 @@ def main():
 
     # spec §5: synchronous subprocess — must complete before Claude gets control
     proc = subprocess.run(
-        [sys.executable, '-m', 'n3memorycore.n3memory', '--hook-submit'],
+        [*python_cmd(), '-m', 'n3memorycore.n3memory', '--hook-submit'],
         input=raw,
         encoding='utf-8',
         capture_output=False,

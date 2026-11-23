@@ -10,6 +10,20 @@ Per-project Claude Code config (.claude/CLAUDE.md, .claude/rules/) is
 resolved against the current working directory at use time.
 """
 import os
+import sys
+
+
+def python_cmd() -> list[str]:
+    """Preserve isolated mode, or keep unrelated working directories off sys.path."""
+    command = [sys.executable]
+    if sys.flags.isolated:
+        command.append('-I')
+    elif sys.version_info >= (3, 11):
+        here = os.path.normcase(os.path.realpath(os.getcwd()))
+        checkout = os.path.normcase(os.path.realpath(os.path.dirname(os.path.dirname(__file__))))
+        if here != checkout:
+            command.append('-P')
+    return command
 
 
 def get_home_dir() -> str:
