@@ -1,20 +1,14 @@
-"""Codex UserPromptSubmit and Stop entry point.
-
-Codex provides a thread_id and the same turn_id to both hooks. We use those
-IDs directly, so concurrent chats cannot exchange Q-A pairing state.
-"""
+"""Codex hook adapter. The hook payload is the conversation boundary."""
 import hashlib
+import io
 import json
 import os
 import re
 import sys
+from contextlib import redirect_stdout
+from pathlib import Path
 
-for _name in ('stdin', 'stdout', 'stderr'):
-    _stream = getattr(sys, _name, None)
-    if _stream is not None and hasattr(_stream, 'reconfigure'):
-        _stream.reconfigure(encoding='utf-8')
-
-from .core.processor import sanitize_surrogates
+from .core.processor import add_chunk_prefixes, chunk_text, purify_text, sanitize_surrogates
 from .paths import MEMORY_DIR
 
 _NO_SAVE = re.compile(
@@ -32,78 +26,100 @@ _SECRETS = re.compile(
     r"パスワード|秘密鍵|認証トークン)\s*[:=：]\s*[^\s]{6,}", re.I)
 
 
-def _skip_path(data):
-    thread = str(data.get('thread_id') or data.get('session_id') or '')
-    turn = str(data.get('turn_id') or '')
-    if not thread or not turn:
+def _handle(flag: str, data: dict) -> dict | None:
+    from . import n3memory as memory
+
+    event = 'UserPromptSubmit' if flag == '--prompt' else 'Stop'
+    if data.get('hook_event_name', event) != event:
+        raise ValueError('unexpected Codex hook event')
+    session = data.get('session_id') or data.get('thread_id')
+    turn = data.get('turn_id')
+    if not all(isinstance(value, str) and value.strip() for value in (session, turn)):
+        raise ValueError('Codex hook requires session_id and turn_id')
+
+    key = hashlib.sha256(f'{session}\0{turn}'.encode('utf-8')).hexdigest()
+    marker = Path(MEMORY_DIR) / f'skip_{key}'
+    if marker.exists():
         return None
-    key = hashlib.sha256((thread + '\0' + turn).encode('utf-8')).hexdigest()
-    return os.path.join(MEMORY_DIR, 'skip_' + key)
+    is_prompt = flag == '--prompt'
+    message = data.get('prompt' if is_prompt else 'last_assistant_message')
+    if not isinstance(message, str) or not message.strip():
+        return None
+    if is_prompt and (_NO_SAVE.search(message) or _SECRETS.search(message)
+                      or message.lstrip().startswith(memory._SYSTEM_PROMPT_PREFIXES)):
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        return None
+    if not is_prompt and _SECRETS.search(message):
+        return None
+
+    cfg = memory._load_config()
+    server_ready = memory.ensure_server(cfg)
+    response = None
+    if is_prompt:
+        if server_ready:
+            try:
+                memory._post(cfg, '/repair', {'max_records': memory._HOOK_REPAIR_MAX_RECORDS},
+                             timeout=3)
+            except Exception:
+                memory.logger.warning('Index repair failed during Codex prompt hook')
+        query = message[:cfg.get('search_query_max_chars', 2000)]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            memory._do_search(query, cfg, current_session=session, local_fallback=True)
+        context = output.getvalue().strip()
+        if context:
+            response = {'hookSpecificOutput': {
+                'hookEventName': event,
+                'additionalContext': context,
+            }}
+
+    # Keep the existing stored prefix for compatibility with DB and ranking.
+    role = 'user' if is_prompt else 'claude'
+    try:
+        for chunk in add_chunk_prefixes(chunk_text(purify_text(message)), role):
+            memory._do_buffer(chunk, cfg, agent_name='codex', session_id=session, turn_id=turn,
+                              timeout=8)
+    except RuntimeError:
+        if response is None:
+            raise
+        # Codex consumes context only from a successful hook response. Keep
+        # the completed search and surface the independent save error.
+        response['systemMessage'] = 'N3MC could not save the complete prompt. Recalled context is still available.'
+
+    if not is_prompt:
+        memory.cmd_stop(cfg)
+    return response
 
 
-def _mark_skip(data):
-    path = _skip_path(data)
-    if path:
-        os.makedirs(MEMORY_DIR, exist_ok=True)
-        with open(path, 'w', encoding='ascii') as f:
-            f.write('skip\n')
-
-
-def _was_skipped(data):
-    path = _skip_path(data)
-    return bool(path and os.path.exists(path))
-
-
-def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in ('--prompt', '--stop'):
-        raise SystemExit('usage: python -m n3memorycore.codex_entry --prompt|--stop')
+def _run(flag: str) -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     try:
         data = json.load(sys.stdin)
         if not isinstance(data, dict):
             raise ValueError('hook input must be a JSON object')
-        data = sanitize_surrogates(data)
-        text = data.get('prompt') or data.get('message') or ''
-        if not isinstance(text, str):
-            text = json.dumps(text, ensure_ascii=False)
-        if sys.argv[1] == '--prompt':
-            if _NO_SAVE.search(text) or _SECRETS.search(text):
-                _mark_skip(data)
-                return
-            from .n3memory import _load_config, cmd_hook_submit
-            sys.stdin = _JsonInput(data)
-            cmd_hook_submit(_load_config())
-        else:
-            if _was_skipped(data):
-                return
-            answer = data.get('last_assistant_message') or ''
-            if isinstance(answer, str) and _SECRETS.search(answer):
-                return
-            from .n3memory import _load_config, cmd_save_claude_turn, _housekeeping
-            cfg = _load_config()
-            sys.stdin = _JsonInput(data)
-            cmd_save_claude_turn(cfg)
-            _housekeeping()
+        output = _handle(flag, sanitize_surrogates(data))
+        if output is not None:
+            print(json.dumps(output, ensure_ascii=False))
     except Exception as exc:
-        print(f'N3MC hook failed: {type(exc).__name__}: {exc}', file=sys.stderr)
-        raise SystemExit(1)
+        print(f'N3MC hook failed ({type(exc).__name__}).', file=sys.stderr)
+        raise SystemExit(1) from None
 
 
-class _JsonInput:
-    def __init__(self, data):
-        self.data = data
-
-    def read(self):
-        return json.dumps(self.data, ensure_ascii=False)
+def main() -> None:
+    if len(sys.argv) != 2 or sys.argv[1] not in ('--prompt', '--stop'):
+        raise SystemExit('usage: python -I -m n3memorycore.codex_entry --prompt|--stop')
+    _run(sys.argv[1])
 
 
-def prompt_main():
-    sys.argv = [sys.argv[0], '--prompt']
-    main()
+def prompt_main() -> None:
+    _run('--prompt')
 
 
-def stop_main():
-    sys.argv = [sys.argv[0], '--stop']
-    main()
+def stop_main() -> None:
+    _run('--stop')
 
 
 if __name__ == '__main__':

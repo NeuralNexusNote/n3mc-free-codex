@@ -2,6 +2,7 @@ import sqlite3
 import struct
 import re
 import logging
+from pathlib import Path
 from typing import Optional, List
 
 logger = logging.getLogger(__name__)
@@ -156,9 +157,14 @@ def _load_vec_extension(conn: sqlite3.Connection) -> None:
 BUSY_TIMEOUT_SECONDS = 10
 
 
-def get_connection(db_path: str) -> sqlite3.Connection:
+def get_connection(db_path: str, *, read_only: bool = False) -> sqlite3.Connection:
     # spec §3 (F11): an explicit busy timeout of 10 s (the default was
     # 5 s); writers wait this long for another connection's write.
+    if read_only:
+        uri = Path(db_path).resolve().as_uri() + '?mode=ro'
+        conn = sqlite3.connect(uri, uri=True, timeout=BUSY_TIMEOUT_SECONDS)
+        conn.row_factory = sqlite3.Row
+        return conn
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=BUSY_TIMEOUT_SECONDS)
     try:
         _load_vec_extension(conn)
@@ -547,6 +553,8 @@ def search_fts(
     limit: int = 50,
     since: Optional[str] = None,
     until: Optional[str] = None,
+    *,
+    raise_on_error: bool = False,
 ) -> List[sqlite3.Row]:
     # spec §3 (v1.5.0): punctuation → spaces, terms ≥ 3 chars, quoted, OR
     fts_query = _build_fts_query(query)
@@ -578,6 +586,8 @@ def search_fts(
         )
         return cursor.fetchall()
     except Exception as e:
+        if raise_on_error:
+            raise
         logger.warning(f"FTS search failed: {e}")
         return []
 
@@ -623,19 +633,20 @@ def fill_bigram_index(conn: sqlite3.Connection, batch_size: int = 500) -> int:
     (records saved before the table existed). Idempotent."""
     total = 0
     while True:
-        rows = conn.execute(
-            "SELECT m.rowid, m.content FROM memories m "
-            "WHERE NOT EXISTS (SELECT 1 FROM memories_fts_bi b "
-            "WHERE b.rowid = m.rowid) LIMIT ?",
-            (batch_size,),
-        ).fetchall()
-        if not rows:
-            break
-        conn.executemany(
-            "INSERT INTO memories_fts_bi(rowid, content) VALUES (?, ?)",
-            [(r[0], bigram_text(r[1])) for r in rows],
-        )
-        conn.commit()
+        with conn:
+            conn.execute('BEGIN IMMEDIATE')
+            rows = conn.execute(
+                "SELECT m.rowid, m.content FROM memories m "
+                "WHERE NOT EXISTS (SELECT 1 FROM memories_fts_bi b "
+                "WHERE b.rowid = m.rowid) LIMIT ?",
+                (batch_size,),
+            ).fetchall()
+            if not rows:
+                break
+            conn.executemany(
+                "INSERT INTO memories_fts_bi(rowid, content) VALUES (?, ?)",
+                [(r[0], bigram_text(r[1])) for r in rows],
+            )
         total += len(rows)
     return total
 
@@ -775,24 +786,26 @@ def get_thread_context(
     after = max(0, after)
 
     before_turns_rows = conn.execute(
-        """SELECT DISTINCT turn_id FROM memories
-           WHERE rowid < ? AND turn_id IS NOT NULL AND turn_id != ?
+        """SELECT turn_id FROM memories
+           WHERE turn_id IS NOT NULL AND turn_id != ?
              AND session_id IS ?
            GROUP BY turn_id
+           HAVING MAX(rowid) < ?
            ORDER BY MAX(rowid) DESC
            LIMIT ?""",
-        (min_r, turn_id, session_id, before),
+        (turn_id, session_id, min_r, before),
     ).fetchall()
     before_turn_ids = [r[0] for r in before_turns_rows]
 
     after_turns_rows = conn.execute(
-        """SELECT DISTINCT turn_id FROM memories
-           WHERE rowid > ? AND turn_id IS NOT NULL AND turn_id != ?
+        """SELECT turn_id FROM memories
+           WHERE turn_id IS NOT NULL AND turn_id != ?
              AND session_id IS ?
            GROUP BY turn_id
+           HAVING MIN(rowid) > ?
            ORDER BY MIN(rowid) ASC
            LIMIT ?""",
-        (max_r, turn_id, session_id, after),
+        (turn_id, session_id, max_r, after),
     ).fetchall()
     after_turn_ids = [r[0] for r in after_turns_rows]
 

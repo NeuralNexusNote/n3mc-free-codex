@@ -1,6 +1,14 @@
 import sys
 import os
 
+# Keep checkout execution working and exclude unrelated working directories
+# before importing the modules used by this entry point.
+if __name__ == '__main__' and sys.path:
+    here = os.path.normcase(os.path.realpath(os.getcwd()))
+    checkout = os.path.normcase(os.path.realpath(os.path.dirname(os.path.dirname(__file__))))
+    if here != checkout and os.path.normcase(os.path.realpath(sys.path[0])) == here:
+        del sys.path[0]
+
 # spec §3: reconfigure all streams to UTF-8 before any I/O (Windows cp932 guard)
 for _s_name in ("stdin", "stdout", "stderr"):
     _s = getattr(sys, _s_name, None)
@@ -30,6 +38,7 @@ from typing import Optional
 from .paths import HOME_DIR, MEMORY_DIR, DB_PATH, PID_FILE, AUDIT_LOG, CONFIG_FILE, NOTICES_FILE, claude_paths
 from .paths import TURN_ID_FILE, CONTEXT_FILE, CONTEXT_RETIRED_MARKER
 from .paths import SERVER_LOG, SERVER_START_FAILED_MARKER
+from .paths import python_cmd
 from .core.database import (
     get_connection, init_db, migrate_schema, insert_memory, insert_memory_once,
     check_exact_duplicate, search_vector, find_unindexed_memories,
@@ -628,12 +637,33 @@ def _wait_for_server(cfg: dict, max_wait: int = 60, proc=None) -> bool:
     process exits (spec §3 "Starting the server", step 2)."""
     deadline = time.time() + max_wait
     while time.time() < deadline:
-        if _health_decision(_get_health(cfg)) == 'ok':
+        health = _get_health(cfg)
+        if _health_decision(health) == 'ok':
+            _adopt_server_pid(health)
             return True
         if proc is not None and proc.poll() is not None:
             return False
         time.sleep(0.5)
     return False
+
+
+def _adopt_server_pid(health: dict) -> None:
+    """Replace a Windows venv launcher's reservation with its serving child."""
+    pid = health.get('pid')
+    if type(pid) is not int or pid <= 0:
+        return
+    try:
+        import psutil
+    except ImportError:
+        return
+    try:
+        with open(PID_FILE, encoding='utf-8') as file:
+            reserved = int(file.read().strip())
+        if reserved != pid and psutil.Process(pid).ppid() == reserved:
+            _atomic_write_text(PID_FILE, str(pid))
+    except (OSError, ValueError, psutil.Error):
+        # No matching reservation, or the server exited during the check.
+        return
 
 
 # Why this command runs without the server (None = it may use the server).
@@ -703,7 +733,7 @@ def _spawn_server():
     log = _open_server_log()
     try:
         return subprocess.Popen(
-            [sys.executable, '-m', 'n3memorycore.n3memory', '--run-server'],
+            [*python_cmd(), '-m', 'n3memorycore.n3memory', '--run-server'],
             stderr=log, stdout=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
             **_detach_kwargs(),
         )
@@ -783,8 +813,8 @@ def _notify_port_conflict(cfg: dict, root: str) -> None:
     _notify(
         'port_conflict',
         f"Port {port} is used by the N3MC server of another folder ({root}). "
-        "This folder saves directly to its own DB and skips memory search "
-        f"until `server_port` in {CONFIG_FILE} is changed to a free port.",
+        "This folder does not use that server. "
+        f"Set `server_port` in {CONFIG_FILE} to a free port to restore server-backed search.",
     )
 
 
@@ -797,24 +827,21 @@ def _psutil_available() -> bool:
 
 
 def _pid_file_process_starting(pid: Optional[int]) -> bool:
-    """spec §3 "PID file handling": is the PID-file process this folder's
-    server that is still starting? Without psutil (broken install), every
-    PID-file process counts as starting for 60 s after the file's mtime."""
-    if not _psutil_available():
+    """Check the server process or honor a recent, still-empty reservation."""
+    if pid is None or not _psutil_available():
         try:
             age = time.time() - os.path.getmtime(PID_FILE)
         except OSError:
             return False
         return age < _PID_FILE_GRACE_SECONDS
-    return bool(pid) and _process_alive(pid) and _is_own_server_process(pid)
+    return pid > 0 and _process_alive(pid) and _is_own_server_process(pid)
 
 
 def ensure_server(cfg: dict) -> bool:
     """Return True when a server of this folder with the current code answers.
 
-    False with _FOREIGN_SERVER_ROOT set: the port belongs to another folder's
-    server (save directly, do not search). False with _NO_SERVER_REASON set:
-    no server for this command (still starting / failed to start).
+    False with _FOREIGN_SERVER_ROOT set: never send this command to that server.
+    False with _NO_SERVER_REASON set: no server for this command.
     """
     global _FOREIGN_SERVER_ROOT, _NO_SERVER_REASON
     _FOREIGN_SERVER_ROOT = None
@@ -824,6 +851,7 @@ def ensure_server(cfg: dict) -> bool:
     health = _get_health(cfg)
     decision = _health_decision(health)
     if decision == 'ok':
+        _adopt_server_pid(health)
         return _server_answered()
     if decision == 'foreign':
         # Another folder's server: do not stop it, do not use it.
@@ -1196,7 +1224,13 @@ def cmd_reembed(cfg: dict) -> int:
                                 "ORDER BY rowid LIMIT 200", (cursor,)).fetchall()
             if not rows:
                 break
-            vecs = model.encode(["passage: " + r[1] for r in rows], normalize_embeddings=True)
+            try:
+                vecs = model.encode(["passage: " + r[1] for r in rows], normalize_embeddings=True)
+                if len(vecs) != len(rows) or any(len(vec) != len(probe) for vec in vecs):
+                    raise ValueError('model returned an incomplete or wrong-dimension batch')
+            except Exception as e:
+                print(f"N3MC: --reembed: batch after rowid {cursor} failed: {e}", file=sys.stderr)
+                return 1
             ids = [r[0] for r in rows]
             conn.execute('BEGIN IMMEDIATE')
             live = [(row[0], vec) for row, vec in zip(rows, vecs)
@@ -1227,7 +1261,7 @@ def _repair_db(max_records: Optional[int] = None) -> int:
     from .core.database import (
         get_connection, find_unindexed_memories, serialize_vector,
         strip_fts_punctuation, bigram_text, fill_bigram_index,
-        init_db, meta_get, meta_set, vec_table_dim,
+        init_db, meta_delete, meta_get, meta_set, vec_table_dim,
     )
     from .core.processor import embed_passage
 
@@ -1242,49 +1276,39 @@ def _repair_db(max_records: Optional[int] = None) -> int:
         init_db(conn)   # spec §3.5 (v1.8.0): the meta table of an older DB
         # spec §3: FTS punct cleaning — one-time migration; key in the meta
         # table (v1.8.0: was the file .memory/fts_punct_cleaned)
-        if meta_get(conn, 'fts_punct_cleaned') != '1':
-            last_rowid = -1
-            cleaned_count = 0
-            finished = False
-            while True:
-                if left() is not None and left() <= 0:
+        while meta_get(conn, 'fts_punct_cleaned') != '1' and (left() is None or left() > 0):
+            # Take the lock before reading the cursor. Concurrent repair
+            # requests must resume from the latest committed page.
+            with conn:
+                conn.execute('BEGIN IMMEDIATE')
+                if meta_get(conn, 'fts_punct_cleaned') == '1':
                     break
-                # Batches of 200 without OFFSET: cleaned rows stay in
-                # memories_fts, so page by rowid (keyset) instead.
+                try:
+                    cursor = int(meta_get(conn, 'fts_punct_cursor') or -1)
+                except ValueError:
+                    cursor = -1
                 rows = conn.execute(
                     "SELECT rowid, content FROM memories_fts WHERE rowid > ? "
-                    "ORDER BY rowid LIMIT 200",
-                    (last_rowid,)
+                    "ORDER BY rowid LIMIT 200", (cursor,)
                 ).fetchall()
-                if not rows:
-                    finished = True
-                    break
-                stopped = False
-                for row in rows:
+                processed = 0
+                for rowid, content in rows:
                     if left() is not None and left() <= 0:
-                        stopped = True
                         break
-                    last_rowid = row[0]
-                    clean = strip_fts_punctuation(row[1])
-                    if clean != row[1]:
-                        conn.execute(
-                            "UPDATE memories_fts SET content = ? WHERE rowid = ?",
-                            (clean, row[0])
-                        )
-                        cleaned_count += 1
+                    clean = strip_fts_punctuation(content)
+                    if clean != content:
+                        conn.execute("UPDATE memories_fts SET content = ? WHERE rowid = ?",
+                                     (clean, rowid))
                         repaired += 1
-                conn.commit()
-                if stopped:
-                    break
-                if len(rows) < 200:
-                    finished = True
-                    break
-            # The key is written only when the migration has finished.
-            if finished:
-                meta_set(conn, 'fts_punct_cleaned', '1')
-                conn.commit()
-            if cleaned_count > 0:
-                print(f"FTS punctuation cleaned: {cleaned_count} record(s).", file=sys.stderr)
+                    cursor = rowid
+                    processed += 1
+                if processed == len(rows) and len(rows) < 200:
+                    meta_set(conn, 'fts_punct_cleaned', '1')
+                    meta_delete(conn, 'fts_punct_cursor')
+                else:
+                    meta_set(conn, 'fts_punct_cursor', str(cursor))
+        if repaired:
+            print(f"FTS punctuation cleaned: {repaired} record(s).", file=sys.stderr)
 
         # spec §3 (2026-11-17): one-time CJK bigram index of the records
         # saved before memories_fts_bi existed. New records are indexed by
@@ -1328,28 +1352,28 @@ def _repair_db(max_records: Optional[int] = None) -> int:
                         vecs[row['rowid']] = embed_passage(row['content'])
                     except Exception as e:
                         logger.warning(f"Repair embed rowid={row['rowid']}: {e}")
+            conn.execute('BEGIN IMMEDIATE')
             for row in rows:
                 rowid    = row['rowid']
                 content  = row['content']
                 # A concurrent forget can remove/reuse rowids while embedding.
                 # Hold the write lock, then verify identity before index writes.
-                if not conn.in_transaction:
-                    conn.execute('BEGIN IMMEDIATE')
                 live = conn.execute('SELECT id FROM memories WHERE rowid = ?', (rowid,)).fetchone()
                 if not live or live['id'] != row['id']:
                     continue
-                has_fts  = row['fts_rowid'] is not None
                 changed  = False
 
-                if rowid in vecs and embedding_index_compatible(conn, current_model):
+                if (rowid in vecs and embedding_index_compatible(conn, current_model)
+                        and not conn.execute("SELECT 1 FROM memories_vec WHERE rowid = ?", (rowid,)).fetchone()):
                     conn.execute(
-                        "INSERT OR IGNORE INTO memories_vec(rowid, embedding) VALUES (?, ?)",
+                        "INSERT INTO memories_vec(rowid, embedding) VALUES (?, ?)",
                         (rowid, serialize_vector(vecs[rowid]))
                     )
                     batch_repaired += 1
                     changed = True
 
-                if not has_fts:
+                if (row['fts_rowid'] is None
+                        and not conn.execute("SELECT 1 FROM memories_fts WHERE rowid = ?", (rowid,)).fetchone()):
                     stripped = strip_fts_punctuation(content)
                     conn.execute(
                         "INSERT INTO memories_fts(rowid, content) VALUES (?, ?)",
@@ -1359,7 +1383,8 @@ def _repair_db(max_records: Optional[int] = None) -> int:
                     changed = True
 
                 # Repair each index independently, even after its initial migration.
-                if row['bigram_rowid'] is None:
+                if (row['bigram_rowid'] is None
+                        and not conn.execute("SELECT 1 FROM memories_fts_bi WHERE rowid = ?", (rowid,)).fetchone()):
                     conn.execute(
                         "INSERT INTO memories_fts_bi(rowid, content) VALUES (?, ?)",
                         (rowid, bigram_text(content))
@@ -1443,6 +1468,8 @@ try:
         # spec §3 (v1.5.0): DNS-rebinding guard on every endpoint
         if not _host_ok(request.headers.get('host')):
             return JSONResponse({'detail': 'Host not allowed'}, status_code=403)
+        if 'origin' in request.headers:
+            return JSONResponse({'detail': 'Origin not allowed'}, status_code=403)
         return await call_next(request)
 
     @app.get('/health')
@@ -1640,7 +1667,10 @@ def _do_buffer(
     agent_name: Optional[str] = None,
     session_id: Optional[str] = None,
     turn_id: Optional[str] = None,
+    *,
+    timeout: Optional[int] = None,
 ) -> None:
+    global _NO_SERVER_REASON
     def _direct():
         try:
             _buffer_direct(text, cfg, agent_name=agent_name,
@@ -1668,16 +1698,21 @@ def _do_buffer(
         'turn_id':    turn_id,
     }
     try:
-        result = _post(cfg, '/buffer', payload)
+        options = {} if timeout is None else {'timeout': timeout}
+        result = _post(cfg, '/buffer', payload, **options)
     except Exception as e:
         print(f"Warning: HTTP buffer failed ({e}), using direct write.", file=sys.stderr)
-        _direct()
-        return
-    if not isinstance(result, dict) or result.get('status') not in ('ok', 'skipped'):
+    else:
+        if isinstance(result, dict) and result.get('status') in ('ok', 'skipped'):
+            return
         reason = result.get('message') if isinstance(result, dict) else 'invalid response'
         print(f"Warning: /buffer failed ({reason}), using direct write.",
               file=sys.stderr)
-        _direct()
+    if timeout is not None:
+        # This hook may contain many chunks. After the first failed request,
+        # avoid timing out again on every chunk.
+        _NO_SERVER_REASON = 'the memory server could not save a chunk'
+    _direct()
 
 
 def _do_search(
@@ -1685,22 +1720,13 @@ def _do_search(
     since: Optional[str] = None,
     until: Optional[str] = None,
     current_session: Optional[str] = None,
+    *,
+    local_fallback: bool = False,
 ) -> None:
     """spec §5.4 (v1.4.0): print the result to stdout only (no file), on
     every invocation, including degraded states."""
     if not query or not query.strip():
         _emit(_status_md("_No relevant memories found._"))
-        return
-
-    if _FOREIGN_SERVER_ROOT is not None:
-        _emit(_status_md(
-            "_(memory search unavailable: another N3MC folder's server is "
-            f"using port {cfg.get('server_port')})_"
-        ))
-        return
-
-    if _NO_SERVER_REASON is not None:
-        _emit(_status_md(f"_(memory search unavailable: {_NO_SERVER_REASON})_"))
         return
 
     payload: dict = {'query': query}
@@ -1712,17 +1738,33 @@ def _do_search(
         payload['session_id'] = current_session
 
     try:
-        result = _post(cfg, '/search', payload)
+        if _FOREIGN_SERVER_ROOT is not None:
+            raise RuntimeError(f"another N3MC folder's server is using port {cfg.get('server_port')}")
+        if _NO_SERVER_REASON is not None:
+            raise RuntimeError(_NO_SERVER_REASON)
+        options = {'timeout': 8} if local_fallback else {}
+        result = _post(cfg, '/search', payload, **options)
         if not isinstance(result, dict):
             raise RuntimeError('invalid /search response')
         if result.get('status') == 'error':
             raise RuntimeError(result.get('message') or '/search error')
     except Exception as e:
-        _emit(_status_md(f"_(memory search unavailable: {e})_"))
-        return
+        if not local_fallback or not os.path.isfile(DB_PATH):
+            _emit(_status_md(f"_(memory search unavailable: {e})_"))
+            return
+        from .core.processor import hybrid_search
+        try:
+            result = hybrid_search(DB_PATH, query, cfg, current_session, since, until,
+                                   keyword_only=True)
+        except Exception as local_error:
+            _emit(_status_md(f"_(memory search unavailable: {e}; local keyword search failed: {local_error})_"))
+            return
+        notices = ['The memory server is unavailable. Results use the local keyword index only.']
+    else:
+        notices = []
 
     try:
-        md = render_memory_context(result, query, notices=_take_notices())
+        md = render_memory_context(result, query, notices=notices + _take_notices())
     except Exception as e:
         md = _status_md(f"_(memory search unavailable: rendering failed: {e})_")
     _emit(md)
@@ -1734,7 +1776,7 @@ def _do_search(
 
 def cmd_buffer(text: str, cfg: dict, agent_name: Optional[str] = None) -> None:
     ensure_server(cfg)
-    _do_buffer(text, cfg, agent_name=agent_name)
+    _do_buffer(text, cfg, agent_name=agent_name, session_id=os.environ.get('N3MC_SESSION_ID'))
 
 
 def cmd_search(
@@ -1745,20 +1787,21 @@ def cmd_search(
     # A failed start falls through: _do_search then prints
     # "_(memory search unavailable: <reason>)_" (spec §5.4).
     ensure_server(cfg)
-    _do_search(query, cfg, since=since, until=until)
+    _do_search(query, cfg, since=since, until=until,
+               current_session=os.environ.get('N3MC_SESSION_ID'))
 
 
-def cmd_repair(cfg: dict) -> None:
+def cmd_repair(cfg: dict) -> int:
     if not ensure_server(cfg) and _FOREIGN_SERVER_ROOT is not None:
         print(
             f"N3MC: --repair skipped: port {cfg.get('server_port')} is used by "
             "another N3MC folder's server.",
             file=sys.stderr,
         )
-        return
+        return 1
     if _NO_SERVER_REASON is not None:
         print(f"N3MC: --repair skipped: {_NO_SERVER_REASON}.", file=sys.stderr)
-        return
+        return 1
     try:
         result = _post(cfg, '/repair', {})   # no limit: process everything
         if not isinstance(result, dict) or result.get('status') != 'ok':
@@ -1769,14 +1812,25 @@ def cmd_repair(cfg: dict) -> None:
             print(f"Repaired {count} record(s).", file=sys.stderr)
     except Exception as e:
         print(f"Repair failed: {e}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _open_db_readonly_ready():
     from .core.database import get_connection, init_db, migrate_schema
     conn = get_connection(DB_PATH)
-    init_db(conn)
-    migrate_schema(conn)
-    return conn
+    try:
+        init_db(conn)
+        migrate_schema(conn)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
+def _print_tsv_record(record: sqlite3.Row) -> None:
+    fields = (record['id'], record['timestamp'], record['agent_name'] or '-', record['content'][:80])
+    print('\t'.join(re.sub(r'[\t\r\n]', ' ', field) for field in fields))
 
 
 def cmd_list(
@@ -1806,10 +1860,7 @@ def cmd_list(
         else:
             for r in rows:
                 # spec §6 test 2: [UUIDv7]\t[timestamp]\t[agent_name]\t[content[:80]]
-                content_80 = (r['content'][:80].replace('\n', ' ')
-                              .replace('\r', ' ').replace('\t', ' '))
-                agent = r['agent_name'] or '-'
-                print(f"{r['id']}\t{r['timestamp']}\t{agent}\t{content_80}")
+                _print_tsv_record(r)
         if fmt != 'jsonl':
             print(f"Total: {len(rows)} records")
     finally:
@@ -1844,10 +1895,7 @@ def cmd_recall_thread(
                 }, ensure_ascii=False))
         else:
             for r in rows:
-                content_80 = (r['content'][:80].replace('\n', ' ')
-                              .replace('\r', ' ').replace('\t', ' '))
-                agent = r['agent_name'] or '-'
-                print(f"{r['id']}\t{r['timestamp']}\t{agent}\t{content_80}")
+                _print_tsv_record(r)
         if fmt != 'jsonl':
             print(f"Total: {len(rows)} records")
     finally:
@@ -2596,7 +2644,7 @@ def main() -> None:
         from .core.processor import sanitize_surrogates
         cmd_search(sanitize_surrogates(args.search), cfg, since=since, until=until)
     elif args.repair:
-        cmd_repair(cfg)
+        sys.exit(cmd_repair(cfg))
     elif args.reembed:
         sys.exit(cmd_reembed(cfg))
     elif args.list:
