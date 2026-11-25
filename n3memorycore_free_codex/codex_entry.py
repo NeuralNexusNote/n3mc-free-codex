@@ -23,7 +23,8 @@ from .core.processor import sanitize_surrogates
 _NO_SAVE = re.compile(
     r"(?:保存|記録|記憶)(?:を|は)?(?:しない|しないで|しなくて|禁止|不要)|"
     r"(?:記憶に|メモリに)残さない|覚えないで|"
-    r"(?:do not|don't|never)\s+(?:save|store|record|remember)|"
+    r"(?:保存|記録|記憶)(?:を|は)?(?:やめて|止めて)|"
+    r"(?:do not|don['’]t|never)\s+(?:save|store|record|remember)\b|"
     r"(?:off the record|do not add (?:this|that) to memory)", re.I)
 _SECRETS = re.compile(
     r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|"
@@ -75,6 +76,7 @@ def handle(event, raw):
     skip_key = hashlib.sha256(f"{session}\0{turn}".encode("utf-8")).hexdigest()
     marker = Path(memory.MEMORY_DIR) / f"skip_{skip_key}"
     if marker.exists():
+        print("N3MC: turn excluded from memory.", file=_sys.stderr)
         return None
     if any(_SECRETS.search(item) for item in _strings(payload)) or (
         is_prompt and message and _NO_SAVE.search(message)
@@ -82,6 +84,7 @@ def handle(event, raw):
         if is_prompt:
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.touch()
+        print("N3MC: turn excluded from memory.", file=_sys.stderr)
         return None
 
     # Audit before loading configuration, searching or touching the DB. Suppress
@@ -102,9 +105,14 @@ def handle(event, raw):
                 memory._post("/repair", {"max_records": 20}, timeout=3)
             except Exception as exc:
                 print(f"N3MC index repair failed ({type(exc).__name__}).", file=_sys.stderr)
+        try:
+            context = memory._search_text(message, session, cfg=cfg)
+        except Exception as exc:
+            print(f"N3MC recall failed ({type(exc).__name__}).", file=_sys.stderr)
+            context = memory._placeholder("_(memory search unavailable)_", [])
         output["hookSpecificOutput"] = {
             "hookEventName": event,
-            "additionalContext": memory._search_text(message, session, cfg=cfg),
+            "additionalContext": context,
         }
 
     if connected:

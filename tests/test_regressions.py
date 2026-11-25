@@ -29,6 +29,26 @@ def search(conn, cfg, q, **kw):
 
 
 class TestFtsQuoting:
+    @pytest.mark.parametrize("indexed", [True, False])
+    def test_incidental_bigram_keeps_keyword_fallback(self, conn, cfg, indexed):
+        add(conn, cfg, "夜間のバックアップ先は銀河倉庫。", embed=indexed)
+        result = search(conn, cfg, "パイナップルケーキの焼き時間")["results"]
+        if indexed:
+            assert all(row["weak"] for row in result)
+        else:
+            assert result and not result[0]["weak"]
+
+    @pytest.mark.parametrize("runner_up, expected_weak", [(0.74, False), (0.79, True)])
+    def test_cross_script_lead(self, conn, cfg, monkeypatch, runner_up, expected_weak):
+        for content in ("夜間の保管場所", "港の管理人"):
+            add(conn, cfg, content, embed=False)
+        rows = [dict(row) for row in conn.execute("SELECT rowid, * FROM memories ORDER BY rowid")]
+        hits = [(row, (2 - 2 * cosine) ** 0.5) for row, cosine in zip(rows, (0.82, runner_up))]
+        monkeypatch.setattr(p, "search_vector", lambda *a, **kw: hits)
+        result = search(conn, cfg, "nightly backups")["results"]
+        assert result[0]["content"] == "夜間の保管場所"
+        assert result[0]["weak"] is expected_weak
+
     @pytest.mark.parametrize("q", [r'C:\Users\test #tag = @a * $b % AND OR NOT "q"', "NEAR( x )", "a\x00b\x1fc",
                                    "!!! ??? ...", "AND", '"""'])
     def test_symbols_never_raise(self, conn, cfg, q):

@@ -203,7 +203,7 @@ def _take_notices():
         if not isinstance(ent, dict):
             continue
         last = ent.get("last_shown")
-        if last is None or now - float(last) >= NOTICE_INTERVAL_SECONDS:
+        if type(last) not in (int, float) or not now - NOTICE_INTERVAL_SECONDS < last <= now:
             out.append(ent.get("message", ""))
             ent["last_shown"] = now
             changed = True

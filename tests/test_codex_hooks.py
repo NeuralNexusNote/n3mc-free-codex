@@ -232,3 +232,43 @@ def test_list_content_keeps_four_tsv_columns(conn, cfg, capsys):
     line = capsys.readouterr().out.splitlines()[0]
     assert len(line.split("\t")) == 4
     assert line.split("\t")[-1] == "key value second line"
+
+
+@pytest.mark.parametrize("prompt", ["この会話の保存はやめてください", "Please don’t save this reply"])
+def test_explicit_privacy_variants(conn, monkeypatch, prompt, capsys):
+    monkeypatch.setattr(memory, "_search_text", lambda *a, **k: pytest.fail("excluded prompt reached search"))
+    assert hook(PROMPT, prompt) is None
+    assert hook(STOP, "acknowledged") is None
+    err = capsys.readouterr().err
+    assert "excluded" in err and prompt not in err
+    assert not Path(memory.AUDIT_LOG).exists()
+    assert db.count_memories(conn) == 0
+
+
+def test_damaged_notice_does_not_block_prompt(conn):
+    Path(memory.NOTICES_FILE).write_text(json.dumps({"disk": {"message": "check disk", "last_shown": "bad"}}))
+    output = hook(PROMPT, "keep this fact")
+    assert "check disk" in output["hookSpecificOutput"]["additionalContext"]
+    assert conn.execute("SELECT content FROM memories").fetchone()[0] == "[user] keep this fact"
+    assert not memory._take_notices()
+
+
+def test_render_exposes_each_local_turn_without_pairs():
+    rows = [dict(content="one", score=0.6, timestamp="", turn_id="first"),
+            dict(content="two", score=0.2, timestamp="", turn_id="second", weak=True)]
+    rendered = memory.render_memory_context("query", rows)
+    assert "turn_id=first" in rendered and "turn_id=second" in rendered
+
+
+def test_search_exception_preserves_prompt_and_reply(conn, monkeypatch):
+    def failed_recall(*args, **kwargs):
+        raise RuntimeError("recall failed")
+
+    monkeypatch.setattr(memory, "_search_text", failed_recall)
+    result = hook(PROMPT, "persist this question")
+    assert "memory search unavailable" in result["hookSpecificOutput"]["additionalContext"]
+    assert hook(STOP, "persist this answer") is None
+    rows = conn.execute("SELECT content, turn_id FROM memories ORDER BY rowid").fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("[user] persist this question", "turn"), ("[claude] persist this answer", "turn")
+    ]

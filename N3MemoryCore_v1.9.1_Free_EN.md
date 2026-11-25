@@ -341,7 +341,7 @@ Notices that require human action (`stale_server`, `port_conflict`, `server_star
 
 1. Print to stderr.
 2. Record `{"ts", "hook": "notice", "key", "message"}` in `audit.log` (only once for the same key and message).
-3. Keep it in `.memory/notices.json` and show it at the top of the output (right after the `Search query:` line in search results, right after the `# Recalled Memory Context` heading in other outputs) **once a day** (when 24 hours have passed since it was last shown) as `> ⚠️ N3MC notice: <message>` (`_take_notices`).
+3. Keep it in `.memory/notices.json` and show it at the top of the output (right after the `Search query:` line in search results, right after the `# Recalled Memory Context` heading in other outputs) **once a day** (when 24 hours have passed since it was last shown) as `> ⚠️ N3MC notice: <message>` (`_take_notices`). Treat a nonnumeric or out-of-range last_shown as unseen, display the notice and continue saving the prompt.
 4. When the cause is gone, remove it with `_clear_notice(key)`.
 5. `notices.json` is written atomically (temporary file in the same folder + `os.replace`), like `config.json` (§3.5).
 
@@ -1030,7 +1030,9 @@ python -m n3memorycore_free_codex.n3memory --show-turn <turn_id>
 
 An eligible nonblank message is preserved without a minimum length or routine-response filter. Before chunking, run `purify_text` once over the entire message and replace fenced code with `[code omitted]`; preserve inline backticks. Slice the original text at paragraph or sentence boundaries when possible, then at a fixed width, with `max_chars=400` and `overlap=40`. Preserve whitespace, including indentation, tabs, and line endings. Persist `[user]` or `[user i/N]` for prompts and `[claude]` or `[claude i/N]` for replies. Both sides carry Codex's `session_id` and `turn_id`, and `agent_name: codex`.
 
-Apply the Free Codex no-save and secret filters before logging, searching or buffering. Recognize explicit no-save requests in Japanese or English and credential patterns such as private-key blocks, service tokens, bearer tokens, or assignments of credentials. A matching prompt creates only the empty marker `.memory/skip_<sha256(session_id + NUL + turn_id)>` and suppresses its reply. A reply with a detected credential is excluded. Validate and sanitize before persisting; a rejected input is reported via stderr without recording its raw text.
+Apply the Free Codex no-save and secret filters before logging, searching or buffering. Recognize explicit no-save requests in Japanese or English, including この会話の保存はやめてください and “Please don’t save this reply” with a typographic apostrophe and credential patterns such as private-key blocks, service tokens, bearer tokens, or assignments of credentials. A matching prompt creates only the empty marker `.memory/skip_<sha256(session_id + NUL + turn_id)>` and suppresses its reply. A reply with a detected credential is excluded. Validate and sanitize before persisting; a rejected input is reported via stderr without recording its raw text.
+
+Include the stored turn_id in each strong or weak result heading when present. This lets the reader open a local turn even when supplementary exchanges are omitted.
 
 ### 5.2 Hook flow and auditing
 
@@ -1068,7 +1070,7 @@ The two hooks forward the same host `turn_id`. Reconstruct sibling rows with use
 
    _If several versions of the same content appear, the one with the newest `saved` time is the current one._
 
-   ## [1] score=0.8123 saved=2026-11-13 10:34 (UTC+0900) claude-code
+   ## [1] score=0.8123 saved=2026-11-13 10:34 (UTC+0900) claude-code turn_id=<turn_id>
    <content>
 
    ## Possibly related (weak matches — may be unrelated)

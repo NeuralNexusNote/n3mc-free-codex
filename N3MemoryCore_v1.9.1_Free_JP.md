@@ -341,7 +341,7 @@ CLI は `/health` の応答を次のように判定する（`_health_decision(he
 
 1. stderr に出す。
 2. `audit.log` に `{"ts", "hook": "notice", "key", "message"}` を記録する（同じ key・同じ文面は 1 回だけ）。
-3. `.memory/notices.json` に残し、検索結果の先頭（検索結果では `Search query:` の行の直後、それ以外の出力では見出し `# Recalled Memory Context` の直後）に **1 日 1 回**（前回出してから 24 時間たったら） `> ⚠️ N3MC notice: <message>` として出す（`_take_notices`）。
+3. `.memory/notices.json` に残し、検索結果の先頭（検索結果では `Search query:` の行の直後、それ以外の出力では見出し `# Recalled Memory Context` の直後）に **1 日 1 回**（前回出してから 24 時間たったら） `> ⚠️ N3MC notice: <message>` として出す（`_take_notices`）。 last_shown が数値以外・範囲外なら未表示として扱い、その回の通知と発言保存を続けます。
 4. 原因がなくなったら `_clear_notice(key)` で消す。
 5. `notices.json` は `config.json` と同じく（§3.5）アトミックに書く（同じフォルダの一時ファイル + `os.replace`）。
 
@@ -1028,7 +1028,9 @@ python -m n3memorycore_free_codex.n3memory --show-turn <turn_id>
 
 対象となる空でない本文には、短さや定型の返事を理由とするフィルターをかけません。分割前に本文全体に `purify_text` を一度使い、フェンスで囲んだコードを `[code omitted]` に置き換え、インラインのバッククォートは保持します。段落・文・固定幅の順で元の文字列を切り出し、`max_chars=400`、`overlap=40` を使います。インデント・タブ・改行コードを含む空白文字を保持します。発言には `[user]` または `[user i/N]`、応答には `[claude]` または `[claude i/N]` を付けます。両方にCodexの `session_id` と `turn_id`、`agent_name: codex` を保存します。
 
-記録・検索・DB保存の前にFree Codex版の保存拒否・秘密情報の判定を行います。日本語・英語の明示的な保存拒否と、秘密鍵・サービストークン・Bearerトークン・資格情報の代入などの形式を検出します。発言が該当したら空の印 `.memory/skip_<sha256(session_id + NUL + turn_id)>` だけを作り、同じターンの応答も除外します。資格情報を検出した応答も除外します。検証とサロゲート除去を先に行い、拒否した入力は本文を記録せずに標準エラーへ報告します。
+記録・検索・DB保存の前にFree Codex版の保存拒否・秘密情報の判定を行います。「この会話の保存はやめてください」「Please don’t save this reply」（曲線型アポストロフィを含む）など、日本語・英語の明示的な保存拒否と、秘密鍵・サービストークン・Bearerトークン・資格情報の代入などの形式を検出します。発言が該当したら空の印 `.memory/skip_<sha256(session_id + NUL + turn_id)>` だけを作り、同じターンの応答も除外します。資格情報を検出した応答も除外します。検証とサロゲート除去を先に行い、拒否した入力は本文を記録せずに標準エラーへ報告します。
+
+検索結果では強い一致・弱い一致の各見出しに、記録にある turn_id を表示します。補足の往復が省略されても、ローカル記録はこの ID で開けます。
 
 ### 5.2 フックと監査
 
@@ -1066,7 +1068,7 @@ python -m n3memorycore_free_codex.n3memory --show-turn <turn_id>
 
    _If several versions of the same content appear, the one with the newest `saved` time is the current one._
 
-   ## [1] score=0.8123 saved=2026-11-13 10:34 (UTC+0900) claude-code
+   ## [1] score=0.8123 saved=2026-11-13 10:34 (UTC+0900) claude-code turn_id=<turn_id>
    <content>
 
    ## Possibly related (weak matches — may be unrelated)

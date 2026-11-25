@@ -30,7 +30,7 @@ _warned_embed = False
 
 def _load_model(name):
     from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(name)
+    return SentenceTransformer(name, device="cpu")
 
 
 def get_model(name=None):
@@ -363,7 +363,11 @@ def hybrid_search(conn, query, cfg, session_id=None, since=None, until=None, emb
     stop = bool(cfg.get("fts_stopwords", False))
     min_terms = int(cfg.get("kw_only_min_terms", 0) or 0)
     q_terms = (fts_terms(query, stop), bigram_terms(query, stop)) if min_terms > 1 else None
+    # One incidental two-character overlap can receive the entire normalized
+    # BM25 score. Keep semantic ranking for longer Japanese/CJK questions.
+    cjk_terms = (fts_terms(query, stop), bigram_terms(query, stop)) if _is_cjk_text(query) else None
     small = count_memories(conn) <= 2
+    actual_cos = {rec["id"]: cosine for rec, cosine in vec_hits}
     kw = {}   # id -> relevance
     recs = {}
     for fn in (search_fts, search_fts_bigram):
@@ -375,13 +379,15 @@ def hybrid_search(conn, query, cfg, session_id=None, since=None, until=None, emb
         raw = {rec["id"]: s for rec, s in hits}
         for rec, _ in hits:
             recs[rec["id"]] = rec
+            if (fn is search_fts_bigram and rec["id"] in actual_cos
+                    and cjk_terms and len(cjk_terms[1]) > 1
+                    and _matched_terms(rec["content"], cjk_terms) < 2):
+                raw.pop(rec["id"], None)
         for k, v in keyword_relevances(raw, cfg["bm25_min_threshold"], small).items():
             kw[k] = max(kw.get(k, 0.0), v)
 
-    actual_cos = {}
-    for rec, c in vec_hits:
+    for rec, _ in vec_hits:
         recs[rec["id"]] = rec
-        actual_cos[rec["id"]] = c
 
     floor = cfg["vector_min_cos"]
     # cross_lang_min_cos (2026-11-22, not in the spec; 0 = off): the best vector hit written in the
@@ -397,6 +403,14 @@ def hybrid_search(conn, query, cfg, session_id=None, since=None, until=None, emb
             c_top, rid_top = max(other)
             if c_top >= cross_floor:
                 cross_best = rid_top
+    elif ("cross_lang_min_cos" not in cfg and cfg.get("embed_model") == DEFAULT_MODEL
+          and len(actual_cos) >= 2):
+        # E5 cosine scales are model-specific. A clear lead supplies additional
+        # evidence when the two scripts have no lexical overlap.
+        first, second = sorted(actual_cos, key=actual_cos.get, reverse=True)[:2]
+        if (actual_cos[first] >= 0.80 and actual_cos[first] - actual_cos[second] >= 0.05
+                and _is_cjk_text(query) != _is_cjk_text(recs[first]["content"])):
+            cross_best = first
     main, pool = [], []
     for rid, rec in recs.items():
         c_act = actual_cos.get(rid, 0.0)
@@ -527,8 +541,9 @@ def render_memory_context(query, results, pairs=None, pairs_omitted=None, notice
     def row(r):
         nonlocal num
         num += 1
+        turn = f" turn_id={r['turn_id']}" if r.get("turn_id") else ""
         return [f"## [{num}] score={r['score']:.4f} saved={_fmt_saved(r['timestamp'])} "
-                f"{r.get('agent_name') or '-'}", r["content"], ""]
+                f"{r.get('agent_name') or '-'}{turn}", r["content"], ""]
 
     if normal:
         lines += ["## Top matches (use these to answer the question)", "",
