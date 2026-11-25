@@ -7,5 +7,5 @@
 - If a hook reports failure, tell the user accurately.
 - This is a standalone memory device. N3MemoryCore MCP connections are disabled. Verify hook trust and a new-chat multi-turn test before relying on automatic capture.
 
-- The standalone data root is `~/.n3mc-free-codex` (`N3MC_FREE_CODEX_HOME`). Connected search uses a verified server plus a local audit log.
-- Prioritize relevant Top matches. Use weak matches only if directly relevant. For local records, use `python -m n3memorycore_free_codex.n3memory --show-turn <turn_id>` or `--recall-thread <turn_id>` when the context is incomplete.
+- The standalone data root is `~/.n3mc-free-codex` (`N3MC_FREE_CODEX_HOME`). Connected mode searches and saves to a verified original Free or Pro server, using its owner and the Codex installation local ID, with a local audit log and no local DB fallback.
+- Prioritize relevant Top matches. Use weak matches only if directly relevant. For local records, use `python -m n3memorycore_free_codex.n3memory --show-turn <turn_id>` or `--recall-thread <turn_id>` when the context is incomplete. For connected records, run the target product CLI with its configured data root and `--show-turn <turn_id>` or `--recall-thread <turn_id>`; the Codex commands read only its local DB.

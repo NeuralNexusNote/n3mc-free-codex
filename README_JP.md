@@ -162,13 +162,15 @@ Free Codex版のリポジトリをクローンし、そのフォルダで手順4
 
 `~/.n3mc-free-codex` にある `config.json` と、整合性の取れた `.memory/n3memory.db` のコピーを一緒にバックアップしてください。別のフォルダを使う場合は `N3MC_FREE_CODEX_HOME` を設定します。アンインストールするときは、先にCodexの設定から本製品のフック2つだけを取り除き、その後でパッケージをアンインストールします。データを復元する予定があればバックアップを残してください。
 
-### 本体Freeの常駐サーバーへの接続
+### 本体Free／Proの常駐サーバーへの接続
 
-既定は単独運用です。`config.json` に `connect_server_port`（ループバックのポート）と `connect_server_root`（本体のデータフォルダの絶対パス）の両方を設定した場合だけ、接続運用になります。既定値はいずれも `null` です。片方だけなら単独運用を続けます。`GET /health` が返す `root` を `os.path.normcase(os.path.abspath(...))` で正規化して比較し、一致する相手だけを使います。本体の `code_version` は照合しません。
+既定は単独運用です。`config.json` に `connect_server_port`（ループバックのポート）と `connect_server_root`（接続先のデータフォルダの絶対パス）の両方を設定した場合だけ、接続運用になります。既定値はいずれも `null` です。片方だけなら単独運用を続け、`connection_incomplete` の知らせを出します。両方設定した場合、または両方解除した場合は知らせを消します。検索・保存のそれぞれの直前に `GET /health` の絶対パスの `root` を `os.path.normcase(os.path.abspath(...))` で正規化し、設定と一致する相手だけを使います。接続先の `code_version` は照合しません。
 
-確認済みの相手には従来の入出力キーで `POST /search` だけを送ります。Free版は所有者で絞らず、本体側の記録も検索対象になります。本体Freeの `/buffer` は受信側の `owner_id` を使うため、Codex側の所有者を区別するために、接続運用中の発言・応答はローカルの `audit.log` だけに記録します。本体の `/buffer` とローカルDBには書き込みません。相手を確認できない、または検索が失敗した場合は「memory search unavailable」を返し、ローカルの監査記録を残します。単独運用の記録にはCodex側の設定にある `owner_id` と `local_id` を使います。
+確認済みの相手に検索を `POST /search`、対象の発言・応答のチャンクを `POST /buffer` で送ります。`agent_name: codex`、フックの `session_id` と `turn_id`、Codex導入環境の `local_id` を送り、`owner_id` は送らず接続先の所有者を使います。フックの `cwd` が空でない文字列なら、Gitルートのフォルダ名（取得できなければ作業フォルダ名）を `project` として送り、`cwd` がなければ省略します。Proは `project` を保存し、Freeは無視します。ローカルの監査ログは残しますが、接続運用中はローカルDBには保存しません。接続先確認・保存の失敗時もローカルDBに退避しません。発言の保存失敗は検索文脈を維持して `systemMessage` で通知し、Stopの保存失敗は非ゼロの終了コードで通知します。検索失敗は「memory search unavailable」を返しますが、別途接続先を確認した保存は続けます。
 
-接続先の起動・停止・再起動・修復・再埋め込みは行いません。`--buffer`・`--repair`・`--reembed` は単独運用で使います。一覧・往復全文・前後の往復はローカルDBを読みます。本体のデータは自動移行しません。
+接続先の起動・停止・再起動・修復・再埋め込みは行いません。`--buffer` は同じ接続先確認と保存経路を使い、`--repair`・`--reembed` は単独運用専用です。一覧・往復全文・前後の往復はローカルDBを読みます。接続先の全文は、接続先製品のCLIでデータルートの環境変数を指定し、`--show-turn <turn_id>` または `--recall-thread <turn_id>` で読みます（Free: `python -m n3memorycore.n3memory`、`N3MC_HOME`、Pro: `python -m n3memorycore_pro.n3memory`、`N3MC_PRO_HOME`）。データは自動移行しません。
+
+単独運用の記録を後から取り込めるよう、`--list --format jsonl` は `id`・`timestamp`・`agent_name`・`content`・`session_id`・`turn_id`・`owner_id`・`local_id` を出力します。JSONLの標準出力はオブジェクトだけとし、件数は標準エラーへ出します。取り込み時に保持するIDは受信製品の仕様なので、本物のデータを移す前に確認します。手元の現行Proの取り込みは `turn_id` を保持しますが `session_id` は保持しないため、この出力だけでは取り込み後の会話全体の再構成を保証できません。
 
 ## ID 階層構造
 

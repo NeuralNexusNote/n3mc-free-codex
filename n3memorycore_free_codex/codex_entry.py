@@ -21,19 +21,37 @@ from . import n3memory as memory
 from .core.processor import sanitize_surrogates
 
 _NO_SAVE = re.compile(
-    r"(?:保存|記録|記憶)(?:を|は)?(?:しない|しないで|しなくて|禁止|不要)|"
-    r"(?:記憶に|メモリに)残さない|覚えないで|"
-    r"(?:保存|記録|記憶)(?:を|は)?(?:やめて|止めて)|"
-    r"(?:do not|don['’]t|never)\s+(?:save|store|record|remember)\b|"
+    r"(?:保存|記録|記憶)(?:を|は)?(?:しないで(?:ください)?|しなくて(?:も)?(?:いい|よい|大丈夫)|禁止|不要|やめて(?:ください)?|止めて(?:ください)?)"
+    r"(?=[。！!、,\s]*$|[。！!\n])|"
+    r"(?:記憶に|メモリに)残さないで(?:ください)?(?=[。！!、,\s]*$|[。！!\n])|"
+    r"覚えないで(?:ください)?(?=[。！!、,\s]*$|[。！!\n])|"
+    r"(?:^|[.!?\n]\s*)(?:please\s+)?(?:do not|don['’]t|never)\s+"
+    r"(?:save|store|record|remember)\s+(?:(?:this|that)(?:\s+(?:reply|message|turn|conversation|chat))?|anything|our conversation|my (?:message|reply))"
+    r"(?:\s+(?:in|to)\s+memory)?(?=\s*(?:[.!?,;]|$))|"
     r"(?:off the record|do not add (?:this|that) to memory)", re.I)
 _SECRETS = re.compile(
     r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|"
     r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|"
     r"github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|"
     r"AIza[0-9A-Za-z_-]{30,})\b|"
-    r"\bBearer\s+[A-Za-z0-9._~+/-]{16,}\b|"
+    r"\bBearer\s+[A-Za-z0-9._~+/-]{16,}\b", re.I)
+_CREDENTIAL_ASSIGNMENT = re.compile(
     r"\b(?:api[_ -]?key|access[_ -]?token|secret|password|passwd|"
-    r"パスワード|秘密鍵|認証トークン)\s*[:=：]\s*[^\s]{6,}", re.I)
+    r"パスワード|秘密鍵|認証トークン)[\"']?\s*[:=：]\s*[\"'`]?(\S+?)(?=[\"'`;,}\]\s]|$)", re.I)
+
+
+def _has_secrets(text):
+    if _SECRETS.search(text):
+        return True
+    for match in _CREDENTIAL_ASSIGNMENT.finditer(text):
+        value = match.group(1).strip("\"'")
+        if re.match(r"(?:os\.(?:environ|getenv)|getenv\(|process\.env\b|\$|%|<)", value, re.I):
+            continue
+        if re.fullmatch(r"(?:x+|\*+|your[_-]?[a-z_-]+|placeholder|dummy|example|changeme)", value, re.I):
+            continue
+        if len(value) >= 6 and re.fullmatch(r"[A-Za-z0-9_./+~!@#$%^&*()=:-]+", value):
+            return True
+    return False
 
 
 def _identifiers(payload):
@@ -53,6 +71,8 @@ def _strings(value):
         yield value
     elif isinstance(value, dict):
         for key, item in value.items():
+            if isinstance(item, str):
+                yield f"{key}: {item}"
             yield key
             yield from _strings(item)
     elif isinstance(value, list):
@@ -77,15 +97,15 @@ def handle(event, raw):
     marker = Path(memory.MEMORY_DIR) / f"skip_{skip_key}"
     if marker.exists():
         print("N3MC: turn excluded from memory.", file=_sys.stderr)
-        return None
-    if any(_SECRETS.search(item) for item in _strings(payload)) or (
+        return {"systemMessage": "N3MC: turn excluded from memory."}
+    if any(_has_secrets(item) for item in _strings(payload)) or (
         is_prompt and message and _NO_SAVE.search(message)
     ):
         if is_prompt:
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.touch()
         print("N3MC: turn excluded from memory.", file=_sys.stderr)
-        return None
+        return {"systemMessage": "N3MC: turn excluded from memory."}
 
     # Audit before loading configuration, searching or touching the DB. Suppress
     # the entire line for excluded turns, including the raw payload.
@@ -115,23 +135,26 @@ def handle(event, raw):
             "additionalContext": context,
         }
 
-    if connected:
-        if not audited:
-            output["systemMessage"] = "N3MC could not save this turn to the local audit log."
-    else:
-        try:
+    try:
+        if connected:
+            from .project import detect_project
+            cwd = payload.get("cwd")
+            project = detect_project(cwd) if isinstance(cwd, str) and cwd.strip() else None
+            _, failed = memory._save_text("user" if is_prompt else "claude", message, turn, session,
+                                          project=project)
+        else:
             _, failed = memory._save_text("user" if is_prompt else "claude", message, turn, session)
-        except Exception as exc:
-            if not is_prompt:
-                raise
-            print(f"N3MC prompt save failed ({type(exc).__name__}).", file=_sys.stderr)
-            failed = True
-        if failed:
-            if not is_prompt:
-                raise RuntimeError("physical save failed")
-            output["systemMessage"] = "N3MC could not save the complete prompt. Recalled context is still available."
-        elif not audited:
-            output["systemMessage"] = "N3MC could not write the local audit log."
+    except Exception as exc:
+        if not is_prompt:
+            raise
+        print(f"N3MC prompt save failed ({type(exc).__name__}).", file=_sys.stderr)
+        failed = True
+    if failed:
+        if not is_prompt:
+            raise RuntimeError("physical save failed")
+        output["systemMessage"] = "N3MC could not save the complete prompt. Recalled context is still available."
+    elif not audited:
+        output["systemMessage"] = "N3MC could not write the local audit log."
 
     if not is_prompt:
         memory.cmd_stop()

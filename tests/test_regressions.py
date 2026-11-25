@@ -33,10 +33,8 @@ class TestFtsQuoting:
     def test_incidental_bigram_keeps_keyword_fallback(self, conn, cfg, indexed):
         add(conn, cfg, "夜間のバックアップ先は銀河倉庫。", embed=indexed)
         result = search(conn, cfg, "パイナップルケーキの焼き時間")["results"]
-        if indexed:
-            assert all(row["weak"] for row in result)
-        else:
-            assert result and not result[0]["weak"]
+        assert result and not result[0]["weak"]
+        assert result[0]["keyword_relevance"] == 1.0
 
     @pytest.mark.parametrize("runner_up, expected_weak", [(0.74, False), (0.79, True)])
     def test_cross_script_lead(self, conn, cfg, monkeypatch, runner_up, expected_weak):
@@ -451,6 +449,7 @@ class TestServerApi:
                 assert not inspect.iscoroutinefunction(r.endpoint)
 
     def test_repair_max_records(self, app, conn, cfg):
+        n3m._repair(conn, cfg)  # Finish migrations before testing the vector-repair budget.
         for i in range(5):
             add(conn, cfg, f"unindexed {i}", embed=False)
         c = TestClient(app, base_url="http://127.0.0.1:18526")

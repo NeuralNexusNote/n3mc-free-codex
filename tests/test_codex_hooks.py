@@ -128,8 +128,8 @@ def test_exclusion_precedes_audit_search_and_db(conn, monkeypatch, prompt):
 
     monkeypatch.setattr(memory, "_search_text", forbidden)
     monkeypatch.setattr(memory, "_save_text", forbidden)
-    assert hook(PROMPT, prompt) is None
-    assert hook(STOP, "I will respect the request") is None
+    assert "excluded" in hook(PROMPT, prompt)["systemMessage"]
+    assert "excluded" in hook(STOP, "I will respect the request")["systemMessage"]
     assert not Path(memory.AUDIT_LOG).exists()
     assert db.count_memories(conn) == 0
     markers = list(Path(memory.MEMORY_DIR).glob("skip_*"))
@@ -162,42 +162,55 @@ def test_housekeeping_expires_only_own_markers_and_rotates(monkeypatch):
     assert Path(memory.AUDIT_LOG + ".1").read_bytes() == b"audit log"
 
 
-@pytest.mark.parametrize("state", ["connected", "wrong_root", "offline", "half_config"])
-def test_connected_search_never_writes_to_target_and_uses_local_audit(state, tmp_path, monkeypatch):
+@pytest.mark.parametrize("state", ["connected", "wrong_root", "offline", "save_error"])
+def test_connected_hooks_save_only_to_verified_target(state, tmp_path, monkeypatch):
+    from n3memorycore_free_codex.project import detect_project
+    expected_project = detect_project(str(tmp_path))
     root = str(tmp_path / "original")
-    cfg = dict(memory.get_config(), connect_server_port=19520,
-               connect_server_root=None if state == "half_config" else root)
+    cfg = dict(memory.get_config(), connect_server_port=19520, connect_server_root=root)
     Path(memory.CONFIG_FILE).write_text(json.dumps(cfg), encoding="utf-8")
     memory._load_config()
-    health = {"root": root if state == "connected" else str(tmp_path / "wrong"), "code_version": "another build"}
     calls = []
-    def get_health(port):
-        calls.append(("health", port))
-        return None if state == "offline" else health
-
+    def health(port):
+        return None if state == "offline" else {"root": root if state != "wrong_root" else str(tmp_path / "wrong")}
     def post(path, body, *, port):
-        calls.append((path, port))
-        assert path == "/search" and body == {"query": "question", "session_id": "chat"}
-        return {"results": [], "pairs": {}, "pairs_omitted": {}}
-
-    def use_server():
-        assert state == "half_config"
-        return False
-
-    monkeypatch.setattr(memory, "_get_health", get_health)
+        calls.append((path, body, port))
+        assert port == 19520
+        if path == "/search":
+            return {"results": [], "pairs": {}, "pairs_omitted": {}}
+        assert path == "/buffer"
+        assert body["agent_name"] == "codex" and body["session_id"] == "chat" and body["turn_id"] == "turn"
+        assert body["local_id"] == cfg["local_id"] and "owner_id" not in body
+        assert body["project"] == expected_project
+        return {"status": "error" if state == "save_error" else "ok"}
+    monkeypatch.setattr(memory, "_get_health", health)
     monkeypatch.setattr(memory, "_post", post)
-    monkeypatch.setattr(memory, "_use_server", use_server)
-    result = hook(PROMPT, "question")
-    assert hook(STOP, "reply") is None
-    expected = "No relevant memories" if state == "connected" else "memory search unavailable"
-    assert expected in result["hookSpecificOutput"]["additionalContext"]
-    events = Path(memory.AUDIT_LOG).read_text(encoding="utf-8").splitlines()
-    assert len(events) == 2
-    if state == "half_config":
-        assert Path(memory.DB_PATH).exists() and calls == []
+    monkeypatch.setattr(memory, "_use_server", lambda: pytest.fail("connected mode started local server"))
+    result = hook(PROMPT, "question", cwd=str(tmp_path))
+    if state == "connected":
+        assert hook(STOP, "reply", cwd=str(tmp_path)) is None
     else:
-        assert not Path(memory.DB_PATH).exists()
-        assert calls == ([("health", 19520), ("/search", 19520)] if state == "connected" else [("health", 19520)])
+        assert "could not save" in result["systemMessage"]
+        with pytest.raises(RuntimeError, match="physical save failed"):
+            hook(STOP, "reply", cwd=str(tmp_path))
+    assert not Path(memory.DB_PATH).exists()
+    assert len(Path(memory.AUDIT_LOG).read_text(encoding="utf-8").splitlines()) == 2
+    assert [call[0] for call in calls] == (["/search", "/buffer", "/buffer"] if state in ("connected", "save_error") else [])
+    if state == "connected":
+        assert [call[1]["content"] for call in calls[1:]] == ["[user] question", "[claude] reply"]
+
+
+@pytest.mark.parametrize("fields", [{"connect_server_port": 19520}, {"connect_server_root": "/original"}])
+def test_half_connection_config_is_not_silent(conn, fields):
+    cfg = dict(memory.get_config(), **fields)
+    Path(memory.CONFIG_FILE).write_text(json.dumps(cfg), encoding="utf-8")
+    memory._load_config()
+    result = hook(PROMPT, "ordinary question")
+    assert "Set both connect_server_port and connect_server_root" in result["hookSpecificOutput"]["additionalContext"]
+    assert conn.execute("SELECT content FROM memories").fetchone()[0] == "[user] ordinary question"
+    complete = dict(cfg, connect_server_port=19520, connect_server_root="/original")
+    memory._connection_target(complete)
+    assert "connection_incomplete" not in memory._notices_read()
 
 
 def test_recall_neighbours_are_from_same_session(conn, cfg, capsys):
@@ -206,10 +219,10 @@ def test_recall_neighbours_are_from_same_session(conn, cfg, capsys):
         add(conn, cfg, turn, turn_id=turn, session_id=session, embed=False)
     assert memory.cmd_recall_thread("anchor", before=1, after=1, fmt="jsonl") == 0
     lines = capsys.readouterr().out.splitlines()
-    assert [json.loads(line)["turn_id"] for line in lines[:-1]] == ["prior", "anchor", "after"]
+    assert [json.loads(line)["turn_id"] for line in lines] == ["prior", "anchor", "after"]
     assert memory.cmd_recall_thread("alone", fmt="jsonl") == 0
     lines = capsys.readouterr().out.splitlines()
-    assert [json.loads(line)["turn_id"] for line in lines[:-1]] == ["alone"]
+    assert [json.loads(line)["turn_id"] for line in lines] == ["alone"]
 
 
 def test_fts_rules_replace_old_index_and_resume(conn, cfg):
@@ -217,6 +230,9 @@ def test_fts_rules_replace_old_index_and_resume(conn, cfg):
     add(conn, cfg, "[claude] talks about [code omitted]", embed=True)
     conn.execute("UPDATE memories_fts SET content=(SELECT content FROM memories WHERE rowid=memories_fts.rowid)")
     conn.commit()
+    memory._repair(conn, cfg, max_records=1)
+    assert db.get_meta(conn, "fts_text_cursor") is None  # punctuation migration consumed the budget
+    memory._repair(conn, cfg, max_records=1)
     memory._repair(conn, cfg, max_records=1)
     assert db.get_meta(conn, "fts_text_cursor") == "1"
     memory._repair(conn, cfg)
@@ -237,8 +253,8 @@ def test_list_content_keeps_four_tsv_columns(conn, cfg, capsys):
 @pytest.mark.parametrize("prompt", ["この会話の保存はやめてください", "Please don’t save this reply"])
 def test_explicit_privacy_variants(conn, monkeypatch, prompt, capsys):
     monkeypatch.setattr(memory, "_search_text", lambda *a, **k: pytest.fail("excluded prompt reached search"))
-    assert hook(PROMPT, prompt) is None
-    assert hook(STOP, "acknowledged") is None
+    assert "excluded" in hook(PROMPT, prompt)["systemMessage"]
+    assert "excluded" in hook(STOP, "acknowledged")["systemMessage"]
     err = capsys.readouterr().err
     assert "excluded" in err and prompt not in err
     assert not Path(memory.AUDIT_LOG).exists()
@@ -272,3 +288,134 @@ def test_search_exception_preserves_prompt_and_reply(conn, monkeypatch):
     assert [tuple(row) for row in rows] == [
         ("[user] persist this question", "turn"), ("[claude] persist this answer", "turn")
     ]
+
+
+@pytest.mark.parametrize("prompt", [
+    "接続先が動いていないときは自分の DB にも保存しない仕様で合っていますか",
+    "Lite は 7 日で消えるので記録は不要になりますか",
+    "この関数は結果を保存しないで返すように直して",
+    "Why does the hook never save the reply when the server is down?",
+    "don't remember where I put the config, can you find it",
+    "覚えないでいい単語帳アプリを作りたい",
+    '設定は password = os.environ["DB_PASSWORD"] で読みます',
+    'DSN の例: password=xxxxxx の部分を変えます',
+    'API key: 環境変数から読みます',
+    'secret: ${{ secrets.PYPI_TOKEN }}',
+    'Authorization: Bearer <YOUR_TOKEN_HERE_1234>',
+])
+def test_ordinary_development_questions_are_not_excluded(conn, monkeypatch, prompt):
+    searched = []
+    monkeypatch.setattr(memory, "_search_text", lambda *a, **k: searched.append(a[0]) or "context")
+    hook(PROMPT, prompt)
+    hook(STOP, "ordinary reply")
+    assert searched == [prompt]
+    assert db.count_memories(conn) == 2
+    assert not list(Path(memory.MEMORY_DIR).glob("skip_*"))
+
+
+@pytest.mark.parametrize("secret", ['password="ActualLongValue123"', 'api_key: abc123XYZ789',
+                                    "Bearer " + "a" * 24, "-----BEGIN PRIVATE KEY-----"])
+def test_credentials_still_exclude_payload(conn, secret):
+    assert "excluded" in hook(PROMPT, secret)["systemMessage"]
+    assert db.count_memories(conn) == 0 and not Path(memory.AUDIT_LOG).exists()
+
+
+def test_whitespace_chunks_are_not_stored_or_numbered(conn):
+    text = "\n \n \n" + "長い本文。" * 230 + "\n \n" * 150
+    hook(PROMPT, text)
+    rows = conn.execute("SELECT content FROM memories ORDER BY rowid").fetchall()
+    assert rows
+    for i, row in enumerate(rows, 1):
+        prefix, body = row[0].split("] ", 1)
+        assert body.strip() and prefix == f"[user {i}/{len(rows)}"
+
+
+def test_list_jsonl_exports_all_identity_fields(conn, cfg, capsys):
+    add(conn, cfg, "exchange", turn_id="turn", session_id="session", embed=False)
+    memory.cmd_list(fmt="jsonl")
+    output = capsys.readouterr()
+    record = json.loads(output.out)
+    assert set(record) == {"id", "timestamp", "agent_name", "content", "session_id", "turn_id", "owner_id", "local_id"}
+    assert record["session_id"] == "session" and record["turn_id"] == "turn"
+    assert record["owner_id"] == cfg["owner_id"] and record["local_id"] == cfg["local_id"]
+    assert output.err == "Total: 1 records\n"
+
+
+def test_reply_secret_is_reported_without_logging_secret(conn, capsys, monkeypatch):
+    hook(PROMPT, "ordinary prompt")
+    raw = json.dumps({"session_id": "chat", "turn_id": "turn", "last_assistant_message": "password=ActualLongValue123"})
+    monkeypatch.setattr(codex_entry._sys, "stdin", io.StringIO(raw))
+    assert codex_entry.stop_main() == 0
+    output = capsys.readouterr()
+    assert "excluded" in json.loads(output.out)["systemMessage"]
+    assert "ActualLongValue123" not in output.out + output.err + Path(memory.AUDIT_LOG).read_text(encoding="utf-8")
+    assert db.count_memories(conn) == 1
+
+
+@pytest.mark.parametrize("outcome", ["ok", "offline", "wrong_root", "error"])
+def test_connected_manual_buffer_uses_verified_target(outcome, tmp_path, monkeypatch, capsys):
+    root = str(tmp_path / "remote")
+    cfg = dict(memory.get_config(), connect_server_port=19520, connect_server_root=root)
+    Path(memory.CONFIG_FILE).write_text(json.dumps(cfg), encoding="utf-8")
+    memory._load_config()
+    monkeypatch.setenv("N3MC_FREE_CODEX_SESSION_ID", "cli-session")
+    monkeypatch.setattr(memory, "_get_health", lambda port: None if outcome == "offline" else
+                        {"root": root if outcome != "wrong_root" else str(tmp_path)})
+    requests = []
+    def post(path, body, *, port):
+        requests.append(path)
+        assert path == "/buffer" and port == 19520
+        assert body["session_id"] == "cli-session" and body["content"] == "a fact"
+        return {"status": "ok" if outcome == "ok" else "error"}
+    monkeypatch.setattr(memory, "_post", post)
+    assert memory.cmd_buffer("a fact") == (0 if outcome == "ok" else 1)
+    assert requests == (["/buffer"] if outcome in ("ok", "error") else [])
+    assert not Path(memory.DB_PATH).exists()
+    assert memory.cmd_repair() == memory.cmd_reembed() == 1
+    assert requests == (["/buffer"] if outcome in ("ok", "error") else [])
+
+@pytest.mark.parametrize("fields", [
+    {"prompt": '{"password": "SyntheticValue123"}'},
+    {"metadata": {"access_token": "SyntheticValue123"}},
+    {"prompt": "api_key=`SyntheticValue123`"},
+])
+def test_structured_credentials_exclude_whole_turn(conn, fields, monkeypatch):
+    monkeypatch.setattr(memory, "_search_text", lambda *a, **kw: pytest.fail("excluded prompt searched"))
+    assert "excluded" in hook(PROMPT, fields.get("prompt", "hello"),
+                              **{k: v for k, v in fields.items() if k != "prompt"})["systemMessage"]
+    assert "excluded" in hook(STOP, "ordinary reply")["systemMessage"]
+    assert not Path(memory.AUDIT_LOG).exists() and db.count_memories(conn) == 0
+
+
+def test_repair_missing_bigram_after_migration(conn, cfg):
+    add(conn, cfg, "盛岡", embed=True)
+    memory._repair(conn, cfg)
+    conn.execute("DELETE FROM memories_fts_bi")
+    conn.commit()
+    assert not db.search_fts_bigram(conn, "盛岡")
+    assert memory._repair(conn, cfg, max_records=1) == 1
+    assert db.search_fts_bigram(conn, "盛岡")
+
+
+def test_bigram_backfill_respects_limit(conn, cfg):
+    for name in ("盛岡", "花巻", "遠野"):
+        add(conn, cfg, name, embed=True)
+    memory._repair(conn, cfg)
+    conn.execute("DELETE FROM memories_fts_bi")
+    db.delete_meta(conn, "fts_bigram")
+    conn.commit()
+    memory._repair(conn, cfg, max_records=1)
+    assert conn.execute("SELECT COUNT(*) FROM memories_fts_bi").fetchone()[0] == 1
+    assert db.get_meta(conn, "fts_bigram") is None
+    memory._repair(conn, cfg)
+    assert db.get_meta(conn, "fts_bigram") == "1"
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_thread_jsonl_has_only_records(conn, cfg, capsys, present):
+    if present:
+        add(conn, cfg, "記録", turn_id="target", embed=False)
+    memory.main(["--recall-thread", "target", "--format", "jsonl"])
+    output = capsys.readouterr()
+    assert [json.loads(line)["content"] for line in output.out.splitlines()] == (["記録"] if present else [])
+    assert f"Total: {int(present)} records" in output.err

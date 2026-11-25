@@ -21,7 +21,7 @@ _HIRAGANA_ONLY_RE = re.compile(r'^[぀-ゟー]+$')
 # English function words (articles, pronouns, auxiliaries, question words, ...). They are in most
 # English records, so a query made of them matched almost everything: "Who is the CEO of the
 # company?" filled Top matches with 20 unrelated rows through `the` / `of` / `is`. Dropped from the
-# keyword terms when config "fts_stopwords" is true (the default since 2026-11-22; not in the spec).
+# keyword terms when config "fts_stopwords" is true (disabled by default).
 EN_STOPWORDS = frozenset("""
 a an the and or but if of to in on at by for with from as into onto about over under than then
 so too very just is are was were be been being am do does did done have has had having it its
@@ -324,7 +324,7 @@ def get_memories_by_turn_id(conn, turn_id):
 
 
 def find_unindexed_memories(conn, limit=200):
-    """Rows missing from memories_vec or memories_fts (both indexes checked). OFFSET is always 0.
+    """Rows missing from any search index. OFFSET is always 0.
 
     The same result as a double LEFT JOIN, written as NOT IN over each index's rowids: a LEFT JOIN
     looks up memories_vec (vec0) once per memories row, about 0.5 ms each on a file DB, so the check
@@ -335,7 +335,7 @@ def find_unindexed_memories(conn, limit=200):
         "SELECT m.rowid AS rowid, m.id AS id, m.content AS content, "
         "(m.rowid NOT IN (SELECT rowid FROM memories_vec)) AS no_vec, "
         "(m.rowid NOT IN (SELECT rowid FROM memories_fts)) AS no_fts "
-        "FROM memories m) WHERE no_vec OR no_fts ORDER BY rowid LIMIT ?",
+        "FROM memories m) WHERE no_vec OR no_fts OR rowid NOT IN (SELECT rowid FROM memories_fts_bi) ORDER BY rowid LIMIT ?",
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
