@@ -164,14 +164,14 @@ Nothing is deleted or replaced automatically in either edition.
 1. Install Python 3.10 or newer and use a Codex client with command hooks. Open a dedicated empty folder or the existing Free Codex checkout in Codex. The editable installation continues to use that folder.
 2. Place this specification in the folder. Ask Codex: “Implement N3MemoryCore Free for Codex according to this specification. Generate the code in this folder and run the isolated tests.”
 3. Codex checks the destination, generates the files, and runs §6–§7 against disposable data. For an existing checkout, preserve unrelated files and recoverable local changes. Do not register the user's hooks as part of code-only regeneration.
-4. To enable memory, install and register from the dedicated folder:
+4. For a complete setup, Codex installs and registers from the authorized dedicated folder, after the prerequisite checks in the implementation specification:
 
 ```bash
 python -m pip install -e ".[test]"
 n3mc-free-codex --init
 ```
 
-5. In Codex **Settings → Hooks** (CLI: `/hooks`), inspect and trust both Free Codex hooks. Start a new chat and verify automatic save and cross-chat recall (§6). The first semantic search may need to download the multilingual embedding model.
+5. The user inspects and trusts both Free Codex hooks in Codex **Settings → Hooks** (CLI: `/hooks`). Codex then performs §6.1–§6.2 and §7 of the implementation specification and reports the evidence, including automatic save and cross-chat recall. The first semantic search may need to download the multilingual embedding model.
 
 ### Install from source
 
