@@ -1,112 +1,115 @@
-import math
+"""Shared fixtures: isolated data folder, fake embeddings, dummy vectors.
+
+Nothing here may touch the real ~/.n3mc-free-codex, the real Codex hooks.json or the real server (port 18526).
+Never use monkeypatch.undo(): it would undo the isolation below as well.
+"""
 import os
-import uuid
+import random
+import urllib.error
+import zlib
+
 import pytest
 
+from n3memorycore_free_codex import n3memory as n3m
+from n3memorycore_free_codex.core import database as db
+from n3memorycore_free_codex.core import processor as proc
 
-_PATH_ATTRS = {
-    'HOME_DIR':               '',
-    'MEMORY_DIR':             '.memory',
-    'DB_PATH':                os.path.join('.memory', 'n3memory.db'),
-    'PID_FILE':               os.path.join('.memory', 'n3mc.pid'),
-    'TURN_ID_FILE':           os.path.join('.memory', 'turn_id.txt'),
-    'CONTEXT_FILE':           os.path.join('.memory', 'memory_context.md'),
-    'CONTEXT_RETIRED_MARKER': os.path.join('.memory', '.memory_context_retired'),
-    'NOTICES_FILE':           os.path.join('.memory', 'notices.json'),
-    'AUDIT_LOG':              os.path.join('.memory', 'audit.log'),
-    'CONFIG_FILE':            'config.json',
-    'SERVER_LOG':             os.path.join('.memory', 'server.log'),
-    'SERVER_START_FAILED_MARKER': os.path.join('.memory', 'server_start_failed'),
-}
+DIM = 768
+# Keep using the real Hugging Face cache even though HOME is faked below (no re-download in tests).
+_REAL_HF_HOME = os.environ.get("HF_HOME") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+
+
+def _unit(vec):
+    n = sum(x * x for x in vec) ** 0.5 or 1.0
+    return [x / n for x in vec]
+
+
+def _word_vec(word):
+    rnd = random.Random(zlib.crc32(word.encode("utf-8")))
+    return [rnd.gauss(0, 1) for _ in range(DIM)]
+
+
+def fake_embed(text):
+    """Deterministic fake embedding: sum of per-token pseudo-random vectors (similar text -> high cosine)."""
+    t = text.lower()
+    toks = t.split()
+    grams = [t[i:i + 3] for i in range(max(1, len(t) - 2))] if any(ord(c) > 0x2E80 for c in t) else toks
+    acc = [0.0] * DIM
+    for g in grams or [t]:
+        v = _word_vec(g)
+        acc = [a + b for a, b in zip(acc, v)]
+    return _unit(acc)
 
 
 @pytest.fixture(autouse=True)
-def _isolate_real_data(tmp_path, monkeypatch):
-    """spec §7 (mandatory): never touch the real ~/.n3mc, the real
-    Codex hooks.json or a real server.
-
-    Every data path of the n3memory module points into a temp folder,
-    `--init` writes a temporary hooks.json,
-    and HTTP / shutdown / process-start helpers are replaced by fakes that
-    never reach the network. Tests that need a server answer monkeypatch
-    these again. The Host check is relaxed for TestClient ("testserver");
-    TestServerApi restores the real check.
-    """
-    from n3memorycore import n3memory
-
-    home = tmp_path / 'n3mc_home'
-    (home / '.memory').mkdir(parents=True)
-    for attr, rel in _PATH_ATTRS.items():
-        if hasattr(n3memory, attr):
-            monkeypatch.setattr(n3memory, attr, str(home / rel) if rel else str(home))
-
-    # --init: a temporary Codex hooks.json (never the real one)
-    user_home = tmp_path / 'user_home'
-    user_home.mkdir(parents=True)
-    monkeypatch.setenv('N3MC_CODEX_HOOKS_PATH', str(user_home / '.codex' / 'hooks.json'))
-
-    def _no_spawn(*args, **kwargs):
-        raise AssertionError('tests must not start a real server process')
-    if hasattr(n3memory, '_spawn_server'):
-        monkeypatch.setattr(n3memory, '_spawn_server', _no_spawn)
-
-    def _no_network(*args, **kwargs):
-        raise ConnectionRefusedError('network disabled in tests')
-
-    for attr in ('_post', '_get'):
-        if hasattr(n3memory, attr):
-            monkeypatch.setattr(n3memory, attr, _no_network)
-    if hasattr(n3memory, '_request_shutdown'):
-        monkeypatch.setattr(n3memory, '_request_shutdown', lambda *a, **k: False)
-    if hasattr(n3memory, '_FOREIGN_SERVER_ROOT'):
-        monkeypatch.setattr(n3memory, '_FOREIGN_SERVER_ROOT', None)
-    for attr, val in (('_NO_SERVER_REASON', None), ('_QUICK_CHECK_DONE', False)):
-        if hasattr(n3memory, attr):
-            monkeypatch.setattr(n3memory, attr, val)
-    if hasattr(n3memory, '_check_host'):
-        real = n3memory._check_host
-        monkeypatch.setattr(n3memory, '_host_ok',
-                            lambda host: (host or '').lower() == 'testserver' or real(host))
-    yield home
-
-
-def _dummy_vec(val: float = 0.5, dim: int = 768) -> list:
-    raw = [val] * dim
-    norm = math.sqrt(sum(x * x for x in raw))
-    return [x / norm for x in raw]
-
-
-@pytest.fixture
-def tmp_db(tmp_path):
-    """Return path to a fresh, initialised DB."""
-    from n3memorycore.core.database import get_connection, init_db
-    db_path = str(tmp_path / 'test.db')
-    conn = get_connection(db_path)
-    init_db(conn)
-    conn.close()
-    return db_path
-
-
-@pytest.fixture
-def cfg(tmp_path):
-    return {
-        'owner_id':               str(uuid.uuid4()),
-        'local_id':               str(uuid.uuid4()),
-        'server_port':            18521,
-        'half_life_days':         90,
-        'bm25_min_threshold':     0.1,
-        'search_result_limit':    20,
-        'min_score':              0.0,
-        'search_query_max_chars': 2000,
+def isolated(tmp_path, monkeypatch):
+    home = tmp_path / "n3mc_home"
+    mem = home / ".memory"
+    mem.mkdir(parents=True)
+    paths = {
+        "HOME_DIR": str(home), "MEMORY_DIR": str(mem), "DB_PATH": str(mem / "n3memory.db"),
+        "PID_FILE": str(mem / "n3mc.pid"), "AUDIT_LOG": str(mem / "audit.log"),
+        "CONFIG_FILE": str(home / "config.json"), "NOTICES_FILE": str(mem / "notices.json"),
+        "SERVER_LOG": str(mem / "server.log"),
+        "SERVER_START_FAILED_FILE": str(mem / "server_start_failed"),
     }
+    for k, v in paths.items():
+        monkeypatch.setattr(n3m, k, v)
+    monkeypatch.setattr(db, "DB_PATH", paths["DB_PATH"])
+    fake_home = tmp_path / "user_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.setenv("HF_HOME", _REAL_HF_HOME)
+    monkeypatch.setenv("N3MC_FREE_CODEX_HOME", str(home))
+    monkeypatch.setenv("N3MC_CODEX_HOOKS_PATH", str(fake_home / "hooks.json"))
+    monkeypatch.delenv("N3MC_FREE_CODEX_SESSION_ID", raising=False)
+    monkeypatch.setattr(n3m, "_CFG_CACHE", None)
+    monkeypatch.setattr(n3m, "_CFG_SOURCE", None)
+    monkeypatch.setattr(n3m, "_SERVER_OK", None)
+    monkeypatch.setattr(n3m, "_FOREIGN_SERVER_ROOT", None)
+    monkeypatch.setattr(n3m, "_QUICK_CHECKED", False)
+    monkeypatch.setattr(n3m, "_SERVER_STARTING", False)
+    monkeypatch.setattr(n3m, "_SERVER_PORT", None)
+    monkeypatch.setattr(n3m, "_SERVER_STATE", {})
+
+    def no_server(*a, **k):
+        raise urllib.error.URLError("no server in tests")
+
+    monkeypatch.setattr(n3m, "_post", no_server)
+    monkeypatch.setattr(n3m, "_get", no_server)
+    monkeypatch.setattr(n3m, "_request_shutdown", lambda *a, **k: False)
+    monkeypatch.setattr(n3m, "_start_server", lambda *a, **k: False)
+    yield tmp_path
 
 
 @pytest.fixture
-def dummy_vec():
-    return _dummy_vec
+def cfg():
+    return dict(n3m.get_config())
 
 
-@pytest.fixture(scope='session')
-def real_model():
-    from n3memorycore.core.processor import get_model
-    return get_model()
+@pytest.fixture
+def conn():
+    c = db.get_connection()
+    db.init_db(c)
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def use_fake_embed(monkeypatch):
+    monkeypatch.setattr(proc, "embed_passage", lambda text, name=None: fake_embed(text))
+    monkeypatch.setattr(proc, "embed_query", lambda text, name=None: fake_embed(text))
+    monkeypatch.setattr(n3m, "embed_passage", lambda text, name=None: fake_embed(text))
+    monkeypatch.setattr(n3m, "embed_query", lambda text, name=None: fake_embed(text))
+    return fake_embed
+
+
+def add(conn, cfg, content, *, turn_id=None, session_id=None, ts=None, embed=True, agent="claude-code"):
+    """Insert one record (optionally with a fake vector)."""
+    from datetime import datetime, timezone
+    rid = n3m._new_id()
+    db.insert_memory(conn, rid, content, ts or datetime.now(timezone.utc).isoformat(), cfg["owner_id"],
+                     cfg["local_id"], agent, session_id, turn_id=turn_id,
+                     embedding=fake_embed(content) if embed else None)
+    return rid

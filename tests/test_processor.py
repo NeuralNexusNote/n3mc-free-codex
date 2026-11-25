@@ -1,179 +1,113 @@
-"""Layer 2: ranking math, purify [code omitted] replacement, embeddings (spec §7)."""
-import math
-import uuid
-from datetime import datetime, timezone, timedelta
+"""Layer 2: ranking maths, purify, chunking, embedding (the real model is used only in TestEmbedding)."""
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from n3memorycore.core.processor import (
-    cosine_sim_from_l2, time_decay, keyword_relevance,
-    purify_text, chunk_text, add_chunk_prefixes, sanitize_surrogates,
-    embed_passage, embed_query, get_model,
-)
+from n3memorycore_free_codex.core import processor as p
 
 
-# ---------------------------------------------------------------------------
 class TestCosineSim:
-
     def test_identical_vectors(self):
-        assert abs(cosine_sim_from_l2(0.0) - 1.0) < 1e-9
+        assert p.cosine_sim_from_l2(0.0) == 1.0
 
     def test_orthogonal_vectors(self):
-        assert abs(cosine_sim_from_l2(math.sqrt(2)) - 0.0) < 1e-9
+        assert abs(p.cosine_sim_from_l2(2 ** 0.5)) < 1e-9
 
     def test_negative_clamped(self):
-        # L2 > sqrt(2) would give cos < 0 → clamped to 0
-        assert cosine_sim_from_l2(10.0) == 0.0
+        assert p.cosine_sim_from_l2(2.0) == 0.0
 
     def test_midpoint(self):
-        # cos = 0.5 → L2² = 2*(1-0.5) = 1 → L2 = 1
-        val = cosine_sim_from_l2(1.0)
-        assert abs(val - 0.5) < 1e-9
+        assert abs(p.cosine_sim_from_l2(1.0) - 0.5) < 1e-9
 
 
-# ---------------------------------------------------------------------------
 class TestTimeDecay:
-
     def test_current_time_is_one(self):
-        now = datetime.now(timezone.utc).isoformat()
-        assert abs(time_decay(now, 90) - 1.0) < 0.01
+        assert abs(p.time_decay(datetime.now(timezone.utc).isoformat(), 90) - 1.0) < 1e-3
 
     def test_half_life(self):
-        past = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
-        val = time_decay(past, 90)
-        assert abs(val - 0.5) < 0.02
+        ts = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        assert abs(p.time_decay(ts, 90) - 0.5) < 1e-3
 
     def test_floor_value(self):
-        old = (datetime.now(timezone.utc) - timedelta(days=10000)).isoformat()
-        val = time_decay(old, 90)
-        assert 0.0 <= val <= 1.0
+        ts = (datetime.now(timezone.utc) - timedelta(days=36500)).isoformat()
+        assert 0 <= p.time_decay(ts, 90) < 1e-6
 
     def test_bad_timestamp_returns_one(self):
-        assert time_decay('not-a-date', 90) == 1.0
+        assert p.time_decay("not a date", 90) == 1.0
 
 
-# ---------------------------------------------------------------------------
 class TestKeywordRelevance:
-
-    def test_small_corpus_bm25_still_counts(self):
-        assert keyword_relevance(-1e-6, 1e-6, 0.1) == 1.0
-
-
     def test_below_threshold_is_zero(self):
-        assert keyword_relevance(-0.05, 1.0, 0.1) == 0.0
+        assert p.keyword_relevances({"a": -0.05, "b": -3.0}, 0.1)["a"] == 0.0
 
     def test_full_relevance(self):
-        assert abs(keyword_relevance(-1.0, 1.0, 0.1) - 1.0) < 1e-9
+        assert p.keyword_relevances({"a": -5.0}, 0.1)["a"] == 1.0
 
     def test_partial_relevance(self):
-        val = keyword_relevance(-0.5, 1.0, 0.1)
-        assert 0.0 < val < 1.0
+        r = p.keyword_relevances({"a": -5.0, "b": -2.5}, 0.1)
+        assert abs(r["b"] - 0.5) < 1e-9
 
     def test_zero_max(self):
-        assert keyword_relevance(-1.0, 0.0, 0.1) == 1.0
+        assert p.keyword_relevances({}, 0.1) == {}
+
+    def test_small_db_best_match_is_one(self):
+        assert p.keyword_relevances({"a": -2e-6}, 0.1, small_db=True)["a"] == 1.0
 
 
-# ---------------------------------------------------------------------------
 class TestPurification:
-
     def test_code_block_replaced(self):
-        text = 'Before\n```python\nprint("hi")\n```\nAfter'
-        result = purify_text(text)
-        assert '[code omitted]' in result
-        assert 'print' not in result
+        assert p.purify_text("a\n```py\nx=1\ny=2\n```\nb") == "a\n[code omitted]\nb"
 
     def test_inline_code_preserved(self):
-        text = 'Use `x = 1` for assignment'
-        result = purify_text(text)
-        assert '`x = 1`' in result
+        assert p.purify_text("use `x = 1` here") == "use `x = 1` here"
 
     def test_multiple_blocks_replaced(self):
-        text = '```a\ncode1\n```\ntext\n```b\ncode2\n```'
-        result = purify_text(text)
-        assert result.count('[code omitted]') == 2
-        assert 'code1' not in result
-        assert 'code2' not in result
+        t = "p\n```\na\nb\n```\nmiddle text\n```\nc\nd\n```\nq"
+        assert p.purify_text(t) == "p\n[code omitted]\nmiddle text\n[code omitted]\nq"
 
     def test_no_code_block_unchanged(self):
-        text = 'No code here, just text.'
-        assert purify_text(text) == text
+        assert p.purify_text("plain 日本語") == "plain 日本語"
+
+    def test_unclosed_fence_untouched(self):
+        assert p.purify_text("```\nnever closed") == "```\nnever closed"
 
 
-# ---------------------------------------------------------------------------
 class TestEmbedding:
+    def test_passage_embedding_shape(self):
+        assert len(p.embed_passage("hello world")) == 768
 
-    def test_passage_embedding_shape(self, real_model):
-        vec = embed_passage('テストテキスト')
-        assert len(vec) == 768
+    def test_query_embedding_shape(self):
+        v = p.embed_query("hello world")
+        assert len(v) == 768 and abs(sum(x * x for x in v) - 1.0) < 1e-3
 
-    def test_query_embedding_shape(self, real_model):
-        vec = embed_query('search query')
-        assert len(vec) == 768
-
-    def test_same_text_similar(self, real_model):
-        v1 = embed_passage('こんにちは世界')
-        v2 = embed_passage('こんにちは世界')
-        dot = sum(a * b for a, b in zip(v1, v2))
-        assert dot > 0.99
+    def test_same_text_similar(self):
+        a, b = p.embed_passage("東京は日本の首都です"), p.embed_query("日本の首都は東京")
+        assert sum(x * y for x, y in zip(a, b)) > 0.8
 
 
-# ---------------------------------------------------------------------------
 class TestRefresh:
-    """Knowledge Refresh — Free edition: dedup skips near-duplicates (no timestamp update).
-    Pro edition would instead refresh (update) the existing record's timestamp."""
+    def test_exact_duplicate_not_inserted(self, conn, cfg):
+        from n3memorycore_free_codex import n3memory as n3m
+        assert n3m._store_record(conn, cfg, "[user] x", turn_id="t", embed=False)["status"] == "ok"
+        assert n3m._store_record(conn, cfg, "[user] x", turn_id="t", embed=False)["status"] == "skipped"
 
-    def test_exact_duplicate_not_inserted(self, tmp_path):
-        """check_exact_duplicate returns True after insert; count stays 1."""
-        import uuid as _uuid
-        from n3memorycore.core.database import (
-            get_connection, init_db, insert_memory,
-            check_exact_duplicate, count_memories,
-        )
-        db_path = str(tmp_path / 'refresh.db')
-        conn = get_connection(db_path)
-        init_db(conn)
-        insert_memory(conn, str(_uuid.uuid4()), 'repeat text',
-                      '2026-01-01T00:00:00', owner_id='o')
-        assert check_exact_duplicate(conn, 'repeat text') is True
-        assert count_memories(conn) == 1
-        conn.close()
-
-    def test_below_threshold_not_duplicate(self):
-        """cos_sim below 0.95 is not treated as a duplicate."""
-        # L2 = 1.0 → cos_sim = 0.5 < 0.95 → not a near-duplicate
-        assert cosine_sim_from_l2(1.0) == 0.5
-        assert cosine_sim_from_l2(1.0) < 0.95
+    def test_below_threshold_not_duplicate(self, conn, cfg):
+        from n3memorycore_free_codex import n3memory as n3m
+        n3m._store_record(conn, cfg, "[user] x", turn_id="t", embed=False)
+        assert n3m._store_record(conn, cfg, "[user] x!", turn_id="t", embed=False)["status"] == "ok"
 
 
-# ---------------------------------------------------------------------------
 class TestBiasScoring:
-
     def test_session_match(self):
-        from n3memorycore.core.processor import hybrid_search
-        # b_session = 1.0 when session matches — verified via score formula
-        now = datetime.now(timezone.utc).isoformat()
-        decay = time_decay(now, 90)
-        cs = 0.8
-        kr = 0.5
-        b = 1.0
-        score = (cs * 0.7 + kr * 0.3) * decay * b
-        assert score > 0
+        assert p.b_session("s1", "s1") == 1.0
 
     def test_session_mismatch_lower(self):
-        now = datetime.now(timezone.utc).isoformat()
-        decay = time_decay(now, 90)
-        cs = 0.8
-        kr = 0.5
-        score_match    = (cs * 0.7 + kr * 0.3) * decay * 1.0
-        score_mismatch = (cs * 0.7 + kr * 0.3) * decay * 0.6
-        assert score_match > score_mismatch
+        assert p.b_session("s1", "s2") == 0.6 and p.b_session(None, "s2") == 0.6
 
-    def test_full_score_formula(self):
-        now = datetime.now(timezone.utc).isoformat()
-        decay = time_decay(now, 90)
-        cs = 0.6
-        kr = 0.4
-        b = 1.0
-        expected = (cs * 0.7 + kr * 0.3) * decay * b
-        actual   = (0.6 * 0.7 + 0.4 * 0.3) * decay * 1.0
-        assert abs(expected - actual) < 1e-9
+    def test_full_score_formula(self, conn, cfg):
+        from .conftest import add, fake_embed
+        add(conn, cfg, "unique zebra sentence", session_id="s1")
+        r = p.hybrid_search(conn, "unique zebra sentence", cfg, session_id="s1", embed_fn=fake_embed)["results"][0]
+        assert abs(r["score"] - r["filter_score"] * p.time_decay(r["timestamp"], 90) * 1.0) < 1e-6
+        r2 = p.hybrid_search(conn, "unique zebra sentence", cfg, session_id="other", embed_fn=fake_embed)["results"][0]
+        assert abs(r2["score"] - 0.6 * r["score"]) < 1e-4 and r2["filter_score"] == r["filter_score"]

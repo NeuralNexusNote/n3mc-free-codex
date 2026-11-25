@@ -44,7 +44,7 @@ jobs:
           project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
           assert project["name"] == "n3memorycore-free-codex", project["name"]
           assert os.environ["RELEASE_TAG"] == "v" + project["version"], "Tag/version mismatch"
-          assert runpy.run_path("n3memorycore/__init__.py")["__version__"] == project["version"]
+          assert runpy.run_path("n3memorycore_free_codex/__init__.py")["__version__"] == project["version"]
           PY
 
       - name: Build and check distributions

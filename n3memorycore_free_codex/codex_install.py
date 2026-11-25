@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import sys
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -26,16 +27,16 @@ def _command(flag: str) -> str:
     python = sys.executable
     if os.name == 'nt':
         return _windows_command(python, flag)
-    return f'{shlex.quote(python)} -I -m n3memorycore.codex_entry {flag}'
+    return f'{shlex.quote(python)} -I -m n3memorycore_free_codex.codex_entry {flag}'
 
 
 def _windows_command(python: str, flag: str) -> str:
     if re.fullmatch(r'[A-Za-z0-9_:/\\.-]+', python):
         # A quoted executable expression needs a call operator in PowerShell.
         # A plain absolute path works in both PowerShell and cmd.exe.
-        return f'{python} -I -m n3memorycore.codex_entry {flag}'
+        return f'{python} -I -m n3memorycore_free_codex.codex_entry {flag}'
     literal = python.replace("'", "''")
-    script = f"& '{literal}' -I -m n3memorycore.codex_entry {flag}; exit $LASTEXITCODE"
+    script = f"& '{literal}' -I -m n3memorycore_free_codex.codex_entry {flag}; exit $LASTEXITCODE"
     encoded = base64.b64encode(script.encode('utf-16le')).decode('ascii')
     return _POWERSHELL_PREFIX + encoded
 
@@ -46,7 +47,7 @@ def _owned(handler: object, flag: str) -> bool:
     command = handler.get('command')
     if not isinstance(command, str):
         return False
-    arguments = rf'-m\s+n3memorycore\.codex_entry\s+{re.escape(flag)}'
+    arguments = rf'-m\s+(?:n3memorycore_free_codex|n3memorycore)\.codex_entry\s+{re.escape(flag)}'
     if command.startswith(_POWERSHELL_PREFIX):
         try:
             script = base64.b64decode(command[len(_POWERSHELL_PREFIX):], validate=True).decode('utf-16le')
@@ -80,7 +81,7 @@ def merge_hooks(document: dict) -> dict:
             'type': 'command',
             'command': _command(flag),
             'timeout': 120,
-            'statusMessage': 'N3MC Free memory',
+            'statusMessage': 'N3MC-Free-Codex memory',
         }]})
         hooks[event] = kept
     return document
@@ -123,7 +124,8 @@ def install() -> int:
         return 1
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
     print(f'Codex hooks registered: {path}')
-    print('Review and trust the two N3MC Free handlers in Codex /hooks.')
+    print('Review and trust the two N3MC-Free-Codex handlers in Codex Settings → Hooks or CLI /hooks.')
     return 0

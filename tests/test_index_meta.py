@@ -1,195 +1,204 @@
-"""v1.8.0 (spec §3.5 "Index metadata"): the meta table, the model-mismatch
-notice and `--reembed` (design review of 2026-11-17, proposal 3).
-
-No embedding model: vectors and the model are fakes. Real data and real
-servers are never touched (conftest._isolate_real_data).
-"""
+"""v1.8.0: the meta table, model-mismatch notice, --reembed (no model: embeddings are faked)."""
 import os
 
-import numpy as np
 import pytest
 
-from n3memorycore import n3memory
-from n3memorycore.core import database as db
-from n3memorycore.core import processor as proc
+from n3memorycore_free_codex import n3memory as n3m
+from n3memorycore_free_codex.core import database as db
+from n3memorycore_free_codex.core import processor as p
 
-from tests.test_regressions import DIM, add, unit
+from .conftest import add, fake_embed
 
-
-class FakeModel:
-    def __init__(self, vec, dim=None):
-        self.vec = np.asarray(vec, dtype=np.float32)
-        if dim is not None:
-            self.vec = np.ones(dim, dtype=np.float32) / np.sqrt(dim)
-        self.seen = []
-
-    def encode(self, texts, normalize_embeddings=True, **kw):
-        if isinstance(texts, str):
-            self.seen.append(texts)
-            return self.vec.copy()
-        self.seen.extend(texts)
-        return np.vstack([self.vec for _ in texts])
+pytestmark = pytest.mark.usefixtures("use_fake_embed")
 
 
-def fresh_db():
-    os.makedirs(n3memory.MEMORY_DIR, exist_ok=True)
-    conn = db.get_connection(n3memory.DB_PATH)
-    try:
-        db.init_db(conn)
-    finally:
-        conn.close()
-    return n3memory.DB_PATH
+def test_init_db_creates_meta(conn):
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name='meta'").fetchone()
 
 
-def meta(key):
-    conn = db.get_connection(n3memory.DB_PATH)
-    try:
-        return db.meta_get(conn, key)
-    finally:
-        conn.close()
+def test_repair_writes_the_keys(conn, cfg):
+    add(conn, cfg, "something to index")
+    n3m._repair(conn, cfg)
+    assert db.get_meta(conn, "fts_punct_cleaned") == "1" and db.get_meta(conn, "fts_bigram") == "1"
+    assert db.get_meta(conn, "embed_model") == cfg["embed_model"] and db.get_meta(conn, "embed_dim") == "768"
+    assert db.get_meta(conn, "embed_model_at")
 
 
-def notices():
-    return n3memory._load_notices()
+def test_old_database_without_meta_keys_gets_its_bigram_rows(conn, cfg):
+    add(conn, cfg, "記憶の設定", embed=False)
+    conn.execute("DELETE FROM memories_fts_bi")
+    db.delete_meta(conn, "fts_bigram")
+    conn.commit()
+    n3m._repair(conn, cfg)
+    assert conn.execute("SELECT COUNT(*) FROM memories_fts_bi").fetchone()[0] == 1
+
+
+def test_vec_model_txt_used_only_when_vectors_exist(conn, cfg):
+    open(os.path.join(n3m.MEMORY_DIR, "vec_model.txt"), "w").write("old/model")
+    n3m._repair(conn, cfg)  # no vectors yet -> configured model
+    assert db.get_meta(conn, "embed_model") == cfg["embed_model"]
+    db.delete_meta(conn, "embed_model")
+    add(conn, cfg, "x")  # a vector now exists
+    n3m._repair(conn, cfg)
+    assert db.get_meta(conn, "embed_model") == "old/model"
+    assert os.path.exists(os.path.join(n3m.MEMORY_DIR, "vec_model.txt"))  # never deleted
+
+
+def test_mismatch_notice_appears_and_clears(conn, cfg):
+    add(conn, cfg, "x")
+    n3m._repair(conn, cfg)
+    assert "embed_model_mismatch" not in n3m._notices_read()
+    n3m._repair(conn, {**cfg, "embed_model": "intfloat/e5-base-v2"})
+    msg = n3m._notices_read()["embed_model_mismatch"]["message"]
+    assert "n3mc-free-codex --reembed" in msg and cfg["embed_model"] in msg and "intfloat/e5-base-v2" in msg
+    n3m._repair(conn, cfg)
+    assert "embed_model_mismatch" not in n3m._notices_read()
+
+
+def test_punct_cleanup_runs_once_and_counts_changes(conn, cfg):
+    add(conn, cfg, "「括弧」付きの文章です")
+    conn.execute("UPDATE memories_fts SET content='「括弧」付きの文章です'")
+    conn.commit()
+    assert n3m._repair(conn, cfg) == 1
+    assert n3m._repair(conn, cfg) == 0
 
 
 @pytest.fixture
-def model_cfg(monkeypatch):
-    def set_model(name):
-        monkeypatch.setattr(n3memory, '_srv_cfg', {'embed_model': name}, raising=False)
-    set_model('model-a')
-    return set_model
+def reembed_env(monkeypatch, conn, cfg):
+    calls = []
+
+    def fake(text, name=None):
+        calls.append(name)
+        return fake_embed(text)
+
+    monkeypatch.setattr(n3m, "embed_passage", fake)
+    monkeypatch.setattr(p, "get_model", lambda name=None: object())
+    monkeypatch.setattr(n3m._processor, "get_model", lambda name=None: object())
+    return calls
 
 
-class TestMetaTable:
-    def test_init_db_creates_meta(self, tmp_path):
-        conn = db.get_connection(str(tmp_path / 'x.db'))
-        try:
-            db.init_db(conn)
-            db.meta_set(conn, 'k', 'v')
-            conn.commit()
-            assert db.meta_get(conn, 'k') == 'v'
-            assert db.vec_table_dim(conn) == DIM
-        finally:
-            conn.close()
-
-    def test_repair_writes_keys_not_files(self, model_cfg):
-        path = fresh_db()
-        add(path, 'a record, with punctuation!', emb=unit(1))
-        n3memory._repair_db()
-        assert meta('fts_punct_cleaned') == '1' and meta('fts_bigram') == '1'
-        assert meta('embed_model') == 'model-a' and meta('embed_dim') == str(DIM)
-        assert meta('embed_model_at')
-        for name in ('fts_punct_cleaned', 'fts_bigram_v1', 'vec_model.txt'):
-            assert not os.path.exists(os.path.join(n3memory.MEMORY_DIR, name))
-
-    def test_restored_db_next_to_old_markers_gets_bigram_index(self, model_cfg):
-        path = fresh_db()
-        add(path, '記憶の保存先', emb=unit(1))
-        add(path, 'PR を作った', emb=unit(2))
-        conn = db.get_connection(path)
-        try:   # an older backup: no bigram rows, no meta keys
-            conn.execute("DELETE FROM memories_fts_bi")
-            conn.commit()
-        finally:
-            conn.close()
-        for name in ('fts_bigram_v1', 'fts_punct_cleaned'):     # the newer DB's v1.7.0 markers
-            with open(os.path.join(n3memory.MEMORY_DIR, name), 'w', encoding='utf-8') as f:
-                f.write('done')
-        n3memory._repair_db()
-        conn = db.get_connection(path)
-        try:
-            assert conn.execute("SELECT COUNT(*) FROM memories_fts_bi").fetchone()[0] == 2
-        finally:
-            conn.close()
+def _vec(conn, rowid):
+    return conn.execute("SELECT embedding FROM memories_vec WHERE rowid=?", (rowid,)).fetchone()[0]
 
 
-class TestEmbedModelRecord:
-    def _legacy(self, name):
-        with open(os.path.join(n3memory.MEMORY_DIR, 'vec_model.txt'), 'w', encoding='utf-8') as f:
-            f.write(name)
-
-    def test_empty_db_takes_the_configured_model(self, model_cfg):
-        fresh_db()
-        self._legacy('old-model')
-        n3memory._repair_db()
-        assert meta('embed_model') == 'model-a'
-        assert 'embed_model_mismatch' not in notices()
-
-    def test_vectors_take_the_legacy_file_and_mismatch_is_a_notice(self, model_cfg):
-        path = fresh_db()
-        add(path, 'made with the old model', emb=unit(1))
-        self._legacy('old-model')
-        n3memory._repair_db()
-        assert meta('embed_model') == 'old-model'
-        msg = notices()['embed_model_mismatch']['message']
-        assert 'old-model' in msg and 'model-a' in msg and 'n3mc --reembed' in msg
-        model_cfg('old-model')                     # set back: the notice goes away
-        n3memory._repair_db()
-        assert 'embed_model_mismatch' not in notices()
-
-    def test_vectors_without_legacy_file_take_the_configured_model(self, model_cfg):
-        path = fresh_db()
-        add(path, 'moved from another PC', emb=unit(1))
-        n3memory._repair_db()
-        assert meta('embed_model') == 'model-a'
+def test_reembed_replaces_every_vector_and_writes_meta(conn, cfg, reembed_env):
+    for i in range(5):
+        db.insert_memory(conn, f"i{i}", f"record {i}", "2026-01-01T00:00:00+00:00", cfg["owner_id"],
+                         embedding=[0.0] * 767 + [1.0])
+    n3m._repair(conn, {**cfg, "embed_model": "intfloat/e5-base-v2"})  # records the old model
+    db.set_meta(conn, "embed_model", "old/model")
+    conn.commit()
+    n3m._notify("embed_model_mismatch", "x")
+    assert n3m.cmd_reembed() == 0
+    c2 = db.get_connection()
+    assert db.deserialize_vector(_vec(c2, 3))[:3] == pytest.approx(fake_embed("record 2")[:3], abs=1e-6)
+    assert db.get_meta(c2, "embed_model") == cfg["embed_model"] and db.get_meta(c2, "reembed_cursor") is None
+    assert "embed_model_mismatch" not in n3m._notices_read()
+    c2.close()
 
 
-class TestReembed:
-    def _setup(self, model_cfg, n=3):
-        path = fresh_db()
-        ids = [add(path, f'record {i}', emb=unit(i + 1)) for i in range(n)]
-        self_vec = unit(1)
-        model_cfg('old-model')
-        n3memory._repair_db()                       # meta.embed_model = old-model
-        model_cfg('new-model')
-        n3memory._repair_db()                       # mismatch notice
-        assert 'embed_model_mismatch' in notices()
-        return path, ids, self_vec
+def test_reembed_resumes_from_the_cursor(conn, cfg, reembed_env, monkeypatch):
+    for i in range(3):
+        add(conn, cfg, f"record {i}")
+    db.set_meta(conn, "reembed_model", cfg["embed_model"])
+    db.set_meta(conn, "reembed_cursor", 2)
+    conn.commit()
+    seen = []
+    monkeypatch.setattr(n3m, "embed_passage", lambda t, name=None: seen.append(t) or fake_embed(t))
+    n3m.cmd_reembed()
+    assert [s for s in seen if s.startswith("record")] == ["record 2"]
 
-    def _vectors(self, path):
-        conn = db.get_connection(path)
-        try:
-            rowids = [r[0] for r in conn.execute("SELECT rowid FROM memories ORDER BY rowid")]
-            return [db.get_vector(conn, r) for r in rowids], rowids
-        finally:
-            conn.close()
 
-    def test_reembed_replaces_every_vector(self, model_cfg, monkeypatch):
-        path, ids, _ = self._setup(model_cfg)
-        fake = FakeModel(unit(7))
-        monkeypatch.setattr(proc, 'get_model', lambda name=None: fake)
-        assert n3memory.cmd_reembed({'embed_model': 'new-model'}) == 0
-        vecs, _ = self._vectors(path)
-        assert all(abs(v[7] - 1.0) < 1e-6 for v in vecs) and len(vecs) == 3
-        assert meta('embed_model') == 'new-model'
-        assert meta('reembed_model') is None and meta('reembed_cursor') is None
-        assert 'embed_model_mismatch' not in notices()
+def test_reembed_refuses_a_different_dimension(conn, cfg, monkeypatch, capsys):
+    add(conn, cfg, "x")
+    before = _vec(conn, 1)
+    monkeypatch.setattr(n3m._processor, "get_model", lambda name=None: object())
+    monkeypatch.setattr(n3m, "embed_passage", lambda t, name=None: [0.1] * 1024)
+    assert n3m.cmd_reembed() == 1
+    assert "1024-dimensional" in capsys.readouterr().err and _vec(conn, 1) == before
 
-    def test_reembed_resumes_from_the_cursor(self, model_cfg, monkeypatch):
-        path, ids, _ = self._setup(model_cfg, n=4)
-        _, rowids = self._vectors(path)
-        conn = db.get_connection(path)
-        try:
-            db.meta_set(conn, 'reembed_model', 'new-model')
-            db.meta_set(conn, 'reembed_cursor', str(rowids[1]))
-            conn.commit()
-        finally:
-            conn.close()
-        fake = FakeModel(unit(7))
-        monkeypatch.setattr(proc, 'get_model', lambda name=None: fake)
-        assert n3memory.cmd_reembed({'embed_model': 'new-model'}) == 0
-        assert [t for t in fake.seen if t != 'passage: probe'] == ['passage: record 2', 'passage: record 3']
-        vecs, _ = self._vectors(path)
-        assert abs(vecs[0][1] - 1.0) < 1e-6          # before the cursor: untouched
-        assert abs(vecs[3][7] - 1.0) < 1e-6
 
-    def test_another_dimension_is_refused(self, model_cfg, monkeypatch, capsys):
-        path, ids, _ = self._setup(model_cfg)
-        before, _ = self._vectors(path)
-        monkeypatch.setattr(proc, 'get_model', lambda name=None: FakeModel(None, dim=384))
-        assert n3memory.cmd_reembed({'embed_model': 'small-model'}) == 1
-        assert '384-dimensional' in capsys.readouterr().err
-        after, _ = self._vectors(path)
-        assert before == after and meta('embed_model') == 'old-model'
-        assert meta('reembed_model') is None
+def test_punct_cleanup_resumes_from_the_cursor_across_limited_calls(conn, cfg):
+    for i in range(450):
+        db.insert_memory(conn, f"i{i}", f"「記録」{i}", "2026-01-01T00:00:00+00:00", cfg["owner_id"],
+                         embedding=fake_embed(f"r{i}"))
+    conn.execute("UPDATE memories_fts SET content = '「' || content || '」'")  # every FTS row is dirty
+    conn.commit()
+    n3m._repair(conn, cfg, max_records=200)
+    assert db.get_meta(conn, "fts_punct_cursor") == "200" and db.get_meta(conn, "fts_punct_cleaned") is None
+    n3m._repair(conn, cfg, max_records=200)
+    assert db.get_meta(conn, "fts_punct_cursor") == "400"
+    n3m._repair(conn, cfg, max_records=200)
+    assert db.get_meta(conn, "fts_punct_cleaned") == "1" and db.get_meta(conn, "fts_punct_cursor") is None
+    assert conn.execute("SELECT COUNT(*) FROM memories_fts WHERE content LIKE '「%'").fetchone()[0] == 0
+
+
+def test_repair_skips_rows_deleted_or_filled_in_while_embedding(conn, cfg, monkeypatch):
+    add(conn, cfg, "will be deleted", embed=False)
+    add(conn, cfg, "filled by someone else", embed=False)
+    gone = conn.execute("SELECT id FROM memories WHERE content='will be deleted'").fetchone()[0]
+    other_rowid = conn.execute("SELECT rowid FROM memories WHERE content='filled by someone else'").fetchone()[0]
+
+    def embed_and_race(text, name=None):
+        c2 = db.get_connection()
+        if text == "will be deleted":
+            db.delete_memory(c2, gone)
+        else:
+            c2.execute("INSERT INTO memories_vec(rowid, embedding) VALUES (?, ?)",
+                       (other_rowid, db.serialize_vector(fake_embed("x"))))
+            c2.commit()
+        c2.close()
+        return fake_embed(text)
+
+    monkeypatch.setattr(n3m, "embed_passage", embed_and_race)
+    n3m._repair(conn, cfg)  # must not raise UNIQUE constraint failed
+    assert conn.execute("SELECT COUNT(*) FROM memories_vec").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+
+
+# ---- 2026-11-22, review #3: the dimension of memories_vec is read from the table
+
+def _make_384_table(conn, cfg):
+    for i in range(3):
+        add(conn, cfg, f"record {i}", embed=False)
+    conn.execute("DROP TABLE memories_vec")
+    conn.execute("CREATE VIRTUAL TABLE memories_vec USING vec0(embedding float[384])")
+    for k in ("embed_model", "embed_dim", "embed_model_at"):
+        db.delete_meta(conn, k)
+    conn.commit()
+
+
+def _e384(text, name=None):
+    v = fake_embed(text)[:384]
+    n = sum(x * x for x in v) ** 0.5
+    return [x / n for x in v]
+
+
+def test_vec_dim_is_read_from_the_table(conn, cfg, monkeypatch):
+    assert db.vec_dim(conn) == 768
+    _make_384_table(conn, cfg)
+    assert db.vec_dim(conn) == 384
+    monkeypatch.setattr(n3m, "embed_passage", _e384)
+    n3m._repair(conn, cfg)
+    assert db.get_meta(conn, "embed_dim") == "384"
+
+
+def test_reembed_works_on_a_384_dimensional_table(conn, cfg, monkeypatch):
+    _make_384_table(conn, cfg)
+    monkeypatch.setattr(n3m._processor, "get_model", lambda name=None: object())
+    monkeypatch.setattr(n3m, "embed_passage", _e384)
+    assert n3m.cmd_reembed() == 0
+    c2 = db.get_connection()
+    assert c2.execute("SELECT COUNT(*) FROM memories_vec").fetchone()[0] == db.count_memories(c2) == 3
+    assert db.get_meta(c2, "embed_dim") == "384"
+    c2.close()
+
+
+def test_reembed_refuses_768_on_a_384_dimensional_table(conn, cfg, monkeypatch, capsys):
+    _make_384_table(conn, cfg)
+    monkeypatch.setattr(n3m._processor, "get_model", lambda name=None: object())
+    monkeypatch.setattr(n3m, "embed_passage", lambda t, name=None: fake_embed(t))
+    assert n3m.cmd_reembed() == 1
+    assert "memories_vec has 384" in capsys.readouterr().err
+    assert conn.execute("SELECT COUNT(*) FROM memories_vec").fetchone()[0] == 0
+    assert db.get_meta(conn, "embed_dim") is None and db.get_meta(conn, "reembed_model") is None
