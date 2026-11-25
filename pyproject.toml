@@ -42,9 +42,9 @@ test = [
 ]
 
 [project.scripts]
-n3mc           = "n3memorycore.n3memory:main"
-n3mc-hook      = "n3memorycore.codex_entry:prompt_main"
-n3mc-stop-hook = "n3memorycore.codex_entry:stop_main"
+n3mc-free-codex = "n3memorycore_free_codex.n3memory:main"
+n3mc-free-codex-hook = "n3memorycore_free_codex.codex_entry:prompt_main"
+n3mc-free-codex-stop-hook = "n3memorycore_free_codex.codex_entry:stop_main"
 
 [project.urls]
 Homepage = "https://github.com/NeuralNexusNote/n3mc-free-codex"
@@ -52,5 +52,5 @@ Issues   = "https://github.com/NeuralNexusNote/n3mc-free-codex/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["n3memorycore*"]
+include = ["n3memorycore_free_codex", "n3memorycore_free_codex.*"]
 exclude = ["tests*"]

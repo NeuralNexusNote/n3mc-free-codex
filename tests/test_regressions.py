@@ -1,1594 +1,838 @@
-"""Layer 5: regression tests for the v1.4.0 – v1.6.0 fixes (spec §7).
-
-No embedding model: vectors are deterministic fakes. Real data and real
-servers are never touched (conftest._isolate_real_data).
-"""
+"""Layer 5: regression tests for v1.4.0 - v1.9.1 fixes. The embedding is faked: no model, a few seconds."""
+import io
 import json
-import math
 import os
-import random
 import sqlite3
+import sys
 import time
-import uuid
-import zlib
+import tomllib
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi.testclient import TestClient
 
-from n3memorycore import codex_entry, n3memory
-from n3memorycore.core import database as db
-from n3memorycore.core import processor as proc
+from n3memorycore_free_codex import n3memory as n3m
+from n3memorycore_free_codex.core import database as db
+from n3memorycore_free_codex.core import processor as p
 
-DIM = 768
+from .conftest import add, fake_embed
 
-
-# --------------------------------------------------------------------------- helpers
-def fake_embed(text: str) -> list:
-    rnd = random.Random(zlib.crc32(text.encode('utf-8')))
-    v = [rnd.gauss(0, 1) for _ in range(DIM)]
-    n = math.sqrt(sum(x * x for x in v))
-    return [x / n for x in v]
+NOW = datetime.now(timezone.utc)
 
 
-def unit(i: int) -> list:
-    v = [0.0] * DIM
-    v[i] = 1.0
-    return v
+def ago(days):
+    return (NOW - timedelta(days=days)).isoformat()
 
 
-def at_cos(c: float, axis: int = 1) -> list:
-    """Unit vector whose cosine with unit(0) is c."""
-    v = [0.0] * DIM
-    v[0] = c
-    v[axis] = math.sqrt(max(0.0, 1.0 - c * c))
-    return v
+def search(conn, cfg, q, **kw):
+    return p.hybrid_search(conn, q, cfg, embed_fn=fake_embed, **kw)
 
 
-def mix(a: list, b: list, wa: float, wb: float) -> list:
-    v = [wa * x + wb * y for x, y in zip(a, b)]
-    n = math.sqrt(sum(x * x for x in v))
-    return [x / n for x in v]
-
-
-def new_db(tmp_path, name='t.db') -> str:
-    path = str(tmp_path / name)
-    conn = db.get_connection(path)
-    db.init_db(conn)
-    conn.close()
-    return path
-
-
-def add(path, content, emb=None, ts=None, turn_id=None, session_id=None):
-    conn = db.get_connection(path)
-    try:
-        rid = str(uuid.uuid4())
-        db.insert_memory(
-            conn, rid, content,
-            ts or datetime.now(timezone.utc).isoformat(),
-            owner_id='o', embedding=emb, turn_id=turn_id, session_id=session_id,
-        )
-        return rid
-    finally:
-        conn.close()
-
-
-def fts_builder():
-    return getattr(db, '_build_fts_query', None) or getattr(db, 'build_fts_query')
-
-
-BASE_CFG = {
-    'half_life_days': 90, 'bm25_min_threshold': 0.1, 'search_result_limit': 20,
-    'min_score': 0.0, 'search_query_max_chars': 2000, 'vector_min_cos': 0.85,
-    'relative_min_score_ratio': 0.6, 'pair_top_n': 3, 'pair_max_chars': 3000,
-    'version_order_enabled': True, 'version_sim_threshold': 0.98,
-    'version_min_chars': 100,
-    # The floor tests check the floors alone; TestWeakMatches turns the
-    # v1.6.0 weak-match fill on.
-    'min_results': 0,
-}
-
-
-def cfg(**kw):
-    c = dict(BASE_CFG)
-    c.update(kw)
-    return c
-
-
-@pytest.fixture
-def query_vec(monkeypatch):
-    """embed_query always returns unit(0)."""
-    monkeypatch.setattr(proc, 'embed_query', lambda text: unit(0))
-    return unit(0)
-
-
-# --------------------------------------------------------------------------- FTS
 class TestFtsQuoting:
-    QUERIES = [
-        r'C:\Users\test #tag = @a * $b % 100',
-        'AND OR NOT NEAR',
-        'say "hello" to him',
-        'tab\there\x00nul\x1fend\x7f',
-        '/ \\ # = @ * $ % + ^ ~ |',
-    ]
+    @pytest.mark.parametrize("q", [r'C:\Users\test #tag = @a * $b % AND OR NOT "q"', "NEAR( x )", "a\x00b\x1fc",
+                                   "!!! ??? ...", "AND", '"""'])
+    def test_symbols_never_raise(self, conn, cfg, q):
+        add(conn, cfg, "plain text about symbols and tags")
+        db.search_fts(conn, q)
+        search(conn, cfg, q)
 
-    @pytest.mark.parametrize('q', QUERIES)
-    def test_built_query_is_valid_fts5(self, tmp_path, q):
-        path = new_db(tmp_path)
-        add(path, 'some content')
-        built = fts_builder()(q)
-        conn = db.get_connection(path)
-        try:
-            if built:
-                conn.execute(
-                    "SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?", (built,)
-                ).fetchall()  # must not raise "fts5: syntax error"
-        finally:
-            conn.close()
+    def test_symbol_word_hits(self, conn, cfg):
+        add(conn, cfg, "path C:/Users/test/#tag here")
+        assert db.search_fts(conn, "test/#tag")
 
-    def test_symbol_term_hits(self, tmp_path):
-        path = new_db(tmp_path)
-        add(path, 'set retries=5 in the file')
-        conn = db.get_connection(path)
-        try:
-            rows = db.search_fts(conn, 'retries=5')
-        finally:
-            conn.close()
-        assert len(rows) == 1
+    def test_hybrid_survives_fts_exception(self, conn, cfg, monkeypatch):
+        add(conn, cfg, "the quick brown fox")
+        monkeypatch.setattr(p, "search_fts", lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("x")))
+        assert search(conn, cfg, "the quick brown fox")["results"]
 
-    def test_operator_words_match_literally(self, tmp_path):
-        path = new_db(tmp_path)
-        add(path, 'cats AND dogs')
-        conn = db.get_connection(path)
-        try:
-            rows = db.search_fts(conn, 'AND dogs')
-        finally:
-            conn.close()
-        assert len(rows) == 1
+    def test_or_semantics(self, conn, cfg):
+        add(conn, cfg, "the quick brown fox", embed=False)
+        assert db.search_fts(conn, "what is the quick fox doing in my DB")
 
-    def test_short_query_still_skipped(self):
-        assert fts_builder()('ab') == ''
+    def test_short_terms_dropped(self):
+        assert db._build_fts_query("AI 東京") == ""
 
-    def test_hybrid_continues_when_fts_raises(self, tmp_path, query_vec, monkeypatch):
-        path = new_db(tmp_path)
-        add(path, 'vector only record', emb=unit(0))
+    def test_punctuation_splits_terms(self, conn, cfg):
+        add(conn, cfg, "架空の惑星「アルファ9」の気温設定", embed=False)
+        assert db.search_fts(conn, "「アルファ9」の気温は？")
 
-        def boom(*a, **k):
-            raise sqlite3.OperationalError('fts5: syntax error near "\\"')
-        monkeypatch.setattr(proc, 'search_fts', boom)
-        out = proc.hybrid_search(path, 'anything', cfg())
-        assert [r['content'] for r in out['results']] == ['vector only record']
+    def test_cjk_terms_split_in_trigrams(self):
+        q = db._build_fts_query("アルファ9の気温")
+        assert '"アルフ"' in q and '"の気温"' in q and " OR " in q
+
+    def test_max_terms(self):
+        assert db._build_fts_query(" ".join(f"term{i:03d}" for i in range(80))).count(" OR ") == 39
 
 
-# --------------------------------------------------------------------------- vector filter
 class TestVectorFilter:
-    def test_in_range_records_found_beyond_global_top_k(self, tmp_path):
-        path = new_db(tmp_path)
-        for i in range(30):   # newer and closer to the query
-            add(path, f'new {i}', emb=at_cos(0.999), ts='2026-06-01T00:00:00+00:00')
-        for i in range(3):    # older, a little farther
-            add(path, f'old {i}', emb=at_cos(0.95, axis=2), ts='2025-01-01T00:00:00+00:00')
-        conn = db.get_connection(path)
-        try:
-            rows = db.search_vector_with_filter(conn, unit(0), k=3,
-                                                until='2025-12-31T23:59:59')
-        finally:
-            conn.close()
-        assert sorted(r['content'] for r in rows) == ['old 0', 'old 1', 'old 2']
+    def test_since_returns_in_range_records_outside_global_top_k(self, conn, cfg):
+        for i in range(8):
+            add(conn, cfg, f"fox story number {i}", ts="2020-01-01T00:00:00+00:00")
+        add(conn, cfg, "fox story recent", ts="2026-06-01T00:00:00+00:00")
+        hits = db.search_vector(conn, fake_embed("fox story"), k=3, since="2026-01-01T00:00:00+00:00")
+        assert [h[0]["content"] for h in hits] == ["fox story recent"]
 
-    def test_exact_fallback_matches_knn(self, tmp_path, monkeypatch):
-        path = new_db(tmp_path)
-        for i, c in enumerate([0.99, 0.9, 0.95, 0.5]):
-            add(path, f'r{i}', emb=at_cos(c), ts='2025-01-01T00:00:00+00:00')
-        conn = db.get_connection(path)
-        try:
-            knn = db.search_vector_with_filter(conn, unit(0), k=3, since='2024-01-01')
-        finally:
-            conn.close()
+    def test_falls_back_to_exact_scan(self, conn, cfg, monkeypatch):
+        add(conn, cfg, "fox story recent", ts="2026-06-01T00:00:00+00:00")
+        real = conn.execute
 
-        class FailingConn:
-            """Wraps a connection; the rowid-IN KNN raises OperationalError."""
+        class Wrap:
             def __init__(self, c):
-                self._c = c
+                self.c = c
 
             def execute(self, sql, *a):
-                if 'MATCH' in sql and 'rowid IN' in sql and 'vec_distance_l2' not in sql:
-                    raise sqlite3.OperationalError('rowid IN not supported')
-                return self._c.execute(sql, *a)
+                if "MATCH" in sql and "rowid IN" in sql:
+                    raise sqlite3.OperationalError("unsupported")
+                return self.c.execute(sql, *a)
 
-            def __getattr__(self, name):
-                return getattr(self._c, name)
+            def __getattr__(self, n):
+                return getattr(self.c, n)
 
-        conn = db.get_connection(path)
-        try:
-            exact = db.search_vector_with_filter(FailingConn(conn), unit(0), k=3,
-                                                 since='2024-01-01')
-        finally:
-            conn.close()
-        assert [r['content'] for r in knn] == ['r0', 'r2', 'r1']
-        assert [r['content'] for r in exact] == ['r0', 'r2', 'r1']
-
-
-# --------------------------------------------------------------------------- dedup
-@pytest.fixture
-def api(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
-    path = new_db(tmp_path, 'api.db')
-    monkeypatch.setattr(n3memory, 'DB_PATH', path)
-    monkeypatch.setattr(n3memory, '_srv_cfg', {'owner_id': 'o', 'local_id': 'l'})
-    monkeypatch.setattr(proc, 'embed_passage', lambda text: unit(0))  # all identical
-    return TestClient(n3memory.app), path
-
-
-def count(path):
-    conn = db.get_connection(path)
-    try:
-        return db.count_memories(conn)
-    finally:
-        conn.close()
+        hits = db.search_vector(Wrap(conn), fake_embed("fox story"), k=3, since="2026-01-01T00:00:00+00:00")
+        assert hits and hits[0][0]["content"] == "fox story recent"
 
 
 class TestNoSimilarityDedup:
-    def test_similar_chunks_all_saved(self, api):
-        client, path = api
-        tid = str(uuid.uuid4())
-        for i in range(6):
-            r = client.post('/buffer', json={'content': f'[claude {i+1}/6] item {i:02d}: same shape',
-                                             'turn_id': tid})
-            assert r.json()['status'] == 'ok'
-        assert count(path) == 6
+    def test_similar_chunks_all_saved(self, conn, cfg):
+        for i in range(3):
+            assert n3m._store_record(conn, cfg, f"[claude {i + 1}/3] 設定の値は{i}です。残りは同じ文章です。", turn_id="T",
+                                     embed=False)["status"] == "ok"
+        assert db.count_memories(conn) == 3
 
-    def test_same_turn_exact_skipped(self, api):
-        client, path = api
-        tid = str(uuid.uuid4())
-        client.post('/buffer', json={'content': '[claude] answer', 'turn_id': tid})
-        r = client.post('/buffer', json={'content': '[claude] answer', 'turn_id': tid})
-        assert r.json()['reason'] == 'exact_duplicate'
-        assert count(path) == 1
-
-    def test_other_turn_exact_saved(self, api):
-        client, path = api
-        client.post('/buffer', json={'content': '[claude 3/12] unchanged item', 'turn_id': 'a'})
-        r = client.post('/buffer', json={'content': '[claude 3/12] unchanged item', 'turn_id': 'b'})
-        assert r.json()['status'] == 'ok'
-        assert count(path) == 2
-
-    def test_no_turn_exact_skipped_globally(self, api):
-        client, path = api
-        client.post('/buffer', json={'content': 'manual note'})
-        r = client.post('/buffer', json={'content': 'manual note'})
-        assert r.json()['status'] == 'skipped'
-        assert count(path) == 1
-
-    def test_direct_write_uses_same_rule(self, tmp_path, monkeypatch):
-        path = new_db(tmp_path, 'direct.db')
-        monkeypatch.setattr(n3memory, 'DB_PATH', path)
-        c = {'owner_id': 'o', 'local_id': 'l'}
-        n3memory._buffer_direct('[claude] x', c, turn_id='a')
-        n3memory._buffer_direct('[claude] x', c, turn_id='a')
-        n3memory._buffer_direct('[claude] x', c, turn_id='b')
-        assert count(path) == 2
-
-
-# --------------------------------------------------------------------------- search shaping
-LONG = 'x' * 120
+    def test_exact_scopes(self, conn, cfg):
+        n3m._store_record(conn, cfg, "same", turn_id="A", embed=False)
+        assert n3m._store_record(conn, cfg, "same", turn_id="A", embed=False)["status"] == "skipped"
+        assert n3m._store_record(conn, cfg, "same", turn_id="B", embed=False)["status"] == "ok"
+        n3m._store_record(conn, cfg, "manual", embed=False)
+        assert n3m._store_record(conn, cfg, "manual", embed=False)["status"] == "skipped"
 
 
 class TestSearchShaping:
-    def test_vector_min_cos_drops_candidates(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        add(path, 'close one', emb=at_cos(0.90))
-        add(path, 'far one', emb=at_cos(0.84, axis=2))
-        out = proc.hybrid_search(path, 'zzz', cfg(relative_min_score_ratio=0.0))
-        assert [r['content'] for r in out['results']] == ['close one']
+    def test_vector_min_cos_drops_unrelated(self, conn, cfg):
+        add(conn, cfg, "alpha beta gamma delta")
+        add(conn, cfg, "zzz qqq www xxx")
+        res = search(conn, cfg, "alpha beta gamma delta", )["results"]
+        assert [r["content"] for r in res if not r["weak"]] == ["alpha beta gamma delta"]
 
-    def test_relative_cut(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        add(path, 'top', emb=at_cos(0.99))
-        add(path, 'weak', emb=at_cos(0.40, axis=2))
-        out = proc.hybrid_search(path, 'zzz', cfg(vector_min_cos=0.0))
-        assert [r['content'] for r in out['results']] == ['top']
+    def test_old_other_session_record_survives_relative_cut(self, conn, cfg):
+        base = "unique zebra aardvark sentence about fast river crossing during dawn light today"
+        add(conn, cfg, base.replace("today", "now"), session_id="s1")
+        add(conn, cfg, base, session_id="s2", ts=ago(30))  # 30 days old, other session, cos ~0.9
+        res = [r for r in search(conn, cfg, base.replace("today", "now"), session_id="s1")["results"]
+               if not r["weak"]]
+        assert len(res) == 2 and res[0]["session_id"] == "s1"
 
-    def _two_versions(self, path, sim_new):
-        old_t, new_t = 'turn-old', 'turn-new'
-        rep_old = unit(0)
-        rep_new = mix(unit(0), unit(3), sim_new, math.sqrt(1 - sim_new ** 2))
-        add(path, '[user] make the setting', emb=unit(5),
-            ts='2026-01-01T00:00:00+00:00', turn_id=old_t)
-        add(path, '[claude 1/2] setting v1 ' + LONG, emb=rep_old,
-            ts='2026-01-01T00:00:01+00:00', turn_id=old_t)
-        add(path, '[user] make the setting again', emb=unit(6),
-            ts='2026-01-02T00:00:00+00:00', turn_id=new_t)
-        add(path, '[claude 1/2] setting v2 ' + LONG, emb=rep_new,
-            ts='2026-01-02T00:00:01+00:00', turn_id=new_t)
-        return old_t, new_t
+    def test_other_session_keyword_only_hit_survives_min_score(self, conn, cfg):
+        add(conn, cfg, "kiwi marmalade ledger", session_id="other", embed=False)
+        res = search(conn, cfg, "kiwi marmalade ledger", session_id="mine")["results"]
+        assert res and res[0]["cos_sim"] == 0.0 and not res[0]["weak"]
 
-    def test_newest_version_first(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        old_t, new_t = self._two_versions(path, 0.99)
-        out = proc.hybrid_search(path, 'zzz', cfg(half_life_days=1e9))
-        res = out['results']
-        assert res[0]['turn_id'] == new_t
-        assert res[1]['turn_id'] == old_t
-        assert res[0]['score'] >= res[1]['score']
-        assert res[0].get('_version_group') and res[1].get('_version_group')
-        assert list(out['pairs'])[0] == new_t
+    def test_old_records_are_returned(self, conn, cfg):
+        add(conn, cfg, "vintage zebra aardvark record", ts=ago(400))
+        res = search(conn, cfg, "vintage zebra aardvark record")["results"]
+        assert res and not res[0]["weak"]
 
-    def test_different_content_not_reordered(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        old_t, new_t = self._two_versions(path, 0.90)
-        out = proc.hybrid_search(path, 'zzz', cfg(half_life_days=1e9))
-        assert out['results'][0]['turn_id'] == old_t
-        assert not out['results'][0].get('_version_group')
+    def test_newer_ranks_above_older_same_similarity(self, conn, cfg):
+        base = "duplicate topic about zebra stripes seen near the wide river bank today"
+        add(conn, cfg, base, ts=ago(400), turn_id="old")
+        add(conn, cfg, base.replace("today", "now"), ts=ago(1), turn_id="new")
+        res = [r for r in search(conn, cfg, base)["results"] if not r["weak"]]
+        assert len(res) == 2 and res[0]["turn_id"] == "new"
 
-    def test_version_rows_survive_relative_cut(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        old_t, new_t = self._two_versions(path, 0.99)
-        out = proc.hybrid_search(path, 'zzz',
-                                 cfg(half_life_days=1e9, relative_min_score_ratio=0.9999))
-        assert {r['turn_id'] for r in out['results']} == {old_t, new_t}
+    def test_pair_top_n_and_max_chars(self, conn, cfg):
+        for t in "ABCDE":
+            add(conn, cfg, f"[user] zebra question {t}", turn_id=t)
+            add(conn, cfg, f"[claude] " + ("answer " * 100), turn_id=t)
+        out = search(conn, cfg, "zebra question")
+        assert len(out["pairs"]) <= cfg["pair_top_n"]
+        assert sum(len(s["content"]) for v in out["pairs"].values() for s in v) <= cfg["pair_max_chars"]
 
-    def test_identical_content_collapsed_to_newest(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        add(path, 'same text', emb=at_cos(0.99), ts='2026-01-01T00:00:00+00:00', turn_id='a')
-        newest = add(path, 'same text', emb=at_cos(0.99), ts='2026-02-01T00:00:00+00:00',
-                     turn_id='b')
-        out = proc.hybrid_search(path, 'zzz', cfg(half_life_days=1e9))
-        assert len(out['results']) == 1
-        assert out['results'][0]['id'] == newest
+    def test_pairs_omitted_when_first_row_too_big(self, conn, cfg):
+        cfg = {**cfg, "pair_max_chars": 10}
+        add(conn, cfg, "[user] zebra question about stripes", turn_id="A")
+        out = search(conn, cfg, "zebra question about stripes")
+        assert out["pairs"] == {} and out["pairs_omitted"] == {"A": 1}
 
-    def test_pair_limits_and_omitted(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        for t in range(4):
-            tid = f't{t}'
-            add(path, f'[user] question {t}', emb=at_cos(0.99 - t * 0.001), turn_id=tid,
-                ts=f'2026-01-0{t+1}T00:00:00+00:00')
-            for i in range(5):
-                add(path, f'[claude {i+1}/5] {t}-{i} ' + 'y' * 380, emb=unit(7 + t * 10 + i),
-                    turn_id=tid, ts=f'2026-01-0{t+1}T00:00:0{i+1}+00:00')
-        out = proc.hybrid_search(path, 'zzz', cfg(half_life_days=1e9, pair_top_n=2,
-                                                  pair_max_chars=1500))
-        pairs, omitted = out['pairs'], out['pairs_omitted']
-        assert len(pairs) <= 2
-        total = sum(len(s['content']) for sib in pairs.values() for s in sib)
-        assert total <= 1500
-        first = list(pairs)[0]
-        assert omitted.get(first) == 6 - len(pairs[first])
+    def test_version_ordering_newest_first(self, conn, cfg):
+        body = "設定の本文 " * 30
+        add(conn, cfg, "[user] 設定を作成して", turn_id="old", ts=ago(5))
+        add(conn, cfg, "[claude] " + body + "旧", turn_id="old", ts=ago(5))
+        add(conn, cfg, "[user] 設定を作成して", turn_id="new", ts=ago(1))
+        add(conn, cfg, "[claude] " + body + "新", turn_id="new", ts=ago(1))
+        res = search(conn, cfg, "設定を作成して 設定の本文")["results"]
+        turns = [r["turn_id"] for r in res if r["turn_id"]]
+        assert turns.index("new") < turns.index("old")
+
+    def test_identical_content_collapsed_keeping_newest(self, conn, cfg):
+        add(conn, cfg, "same words everywhere here", turn_id="a", ts=ago(9))
+        add(conn, cfg, "same words everywhere here", turn_id="b", ts=ago(1))
+        res = [r for r in search(conn, cfg, "same words everywhere here")["results"]]
+        assert len(res) == 1 and res[0]["turn_id"] == "b"
+
+    def test_at_most_two_chunks_per_turn(self, conn, cfg):
+        for i in range(5):
+            add(conn, cfg, f"[claude {i + 1}/5] zebra stripes chunk {i}", turn_id="T")
+        res = search(conn, cfg, "zebra stripes chunk")["results"]
+        assert len([r for r in res if r["turn_id"] == "T"]) <= 2
 
 
-# --------------------------------------------------------------------------- render
 class TestRender:
-    def test_saved_note_omitted_and_notice(self):
-        ts = '2026-01-01T00:00:00+00:00'
-        local = datetime.fromisoformat(ts).astimezone()
-        md = proc.render_memory_context(
-            {'results': [{'id': '1', 'content': 'c', 'score': 0.9, 'timestamp': ts,
-                          'agent_name': 'claude-code', 'turn_id': 't'}],
-             'pairs': {'t': [{'id': '1', 'content': '[user] q', 'timestamp': ts}]},
-             'pairs_omitted': {'t': 2}},
-            'q', notices=['port conflict'])
-        assert f"saved={local:%Y-%m-%d %H:%M} (UTC{local:%z})" in md
-        assert 'does not prove a correction' in md
-        assert '--show-turn t' in md and '2 more chunk' in md
-        assert md.index('N3MC notice: port conflict') < md.index('## Top matches')
+    def _res(self, **kw):
+        base = {"id": "1", "content": "hello", "score": 0.5, "timestamp": "2026-11-13T01:34:56.123456+00:00",
+                "turn_id": "T", "agent_name": "claude-code", "weak": False}
+        return {**base, **kw}
+
+    def test_saved_is_local_time_with_offset(self):
+        out = p.render_memory_context("q", [self._res()])
+        assert "saved=" in out and "(UTC" in out and "newest `saved` time" in out
+
+    def test_omitted_line_names_show_turn(self):
+        out = p.render_memory_context("q", [self._res()], {"T": [{"id": "1", "content": "x", "timestamp":
+                                      "2026-11-13T01:34:56+00:00"}]}, {"T": 3})
+        assert "3 more chunk(s) of this exchange omitted" in out and "--show-turn T" in out
+
+    def test_notice_comes_first(self):
+        out = p.render_memory_context("q", [self._res()], notices=["fix me"])
+        assert out.index("N3MC notice: fix me") < out.index("## Top matches")
+
+    def test_weak_after_top_and_numbering_continues(self):
+        out = p.render_memory_context("q", [self._res(), self._res(weak=True, content="weakone")])
+        assert out.index("## Top matches") < out.index("## Possibly related") < out.index("weakone")
+        assert "## [1]" in out and "## [2]" in out
+
+    def test_only_weak(self):
+        out = p.render_memory_context("q", [self._res(weak=True)])
+        assert "_No relevant memories found._" in out and "## [1]" in out and "## Top matches" not in out
+
+    def test_no_weak_no_heading(self):
+        assert "Possibly related" not in p.render_memory_context("q", [self._res()])
 
 
-# --------------------------------------------------------------------------- --stop leaves project files alone
-def stop_in(tmp_path, monkeypatch):
-    """Run from a project folder that has files of another host's tooling."""
-    claude_dir = tmp_path / 'proj' / '.claude'
-    (claude_dir / 'rules').mkdir(parents=True)
-    monkeypatch.chdir(tmp_path / 'proj')
-    return claude_dir
-
-
-class TestNoContextFile:
-    def test_search_writes_stdout_only(self, monkeypatch, capsys):
-        monkeypatch.setattr(n3memory, 'ensure_server', lambda c: True)
-        monkeypatch.setattr(n3memory, '_post',
-                            lambda *a, **k: {'results': [], 'pairs': {}, 'pairs_omitted': {}})
-        n3memory.cmd_search('hello', {'server_port': 1})
-        assert '# Recalled Memory Context' in capsys.readouterr().out
-        assert not os.path.exists(os.path.join(n3memory.MEMORY_DIR, 'memory_context.md'))
-
-    def test_stop_leaves_clean_file_alone(self, tmp_path, monkeypatch):
-        claude_dir = stop_in(tmp_path, monkeypatch)
-        md = claude_dir / 'CLAUDE.md'
-        md.write_text('# Mine\n', encoding='utf-8')
-        n3memory.cmd_stop({})
-        assert md.read_text(encoding='utf-8') == '# Mine\n'
-        assert not [p for p in os.listdir(claude_dir) if '.bak-n3mc-' in p]
-
-    def test_stop_does_not_create_claude_md(self, tmp_path, monkeypatch):
-        claude_dir = stop_in(tmp_path, monkeypatch)
-        n3memory.cmd_stop({})
-        assert not (claude_dir / 'CLAUDE.md').exists()
-
-
-def notices():
-    try:
-        with open(n3memory.NOTICES_FILE, encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-
-# --------------------------------------------------------------------------- config
-def write_cfg(text):
-    with open(n3memory.CONFIG_FILE, 'w', encoding='utf-8') as f:
-        f.write(text)
-
-
-def read_cfg():
-    with open(n3memory.CONFIG_FILE, encoding='utf-8') as f:
-        return f.read()
-
-
-IDS = '"owner_id": "11111111-1111-4111-8111-111111111111", "local_id": "22222222-2222-4222-8222-222222222222"'
-
-
-class TestConfig:
-    def test_unreadable_not_overwritten(self):
-        write_cfg('{"server_port": 18599,,}')
-        c = n3memory._load_config()
-        assert read_cfg() == '{"server_port": 18599,,}'
-        assert c['server_port'] == 18520
-        assert 'config_unreadable' in notices()
-
-    def test_non_object_not_overwritten(self):
-        write_cfg('[1, 2]')
-        n3memory._load_config()
-        assert read_cfg() == '[1, 2]'
-        assert 'config_unreadable' in notices()
-
-    def test_wrong_type_item_ignored_others_used(self):
-        text = '{' + IDS + ', "server_port": 18599, "vector_min_cos": "0.83"}'
-        write_cfg(text)
-        c = n3memory._load_config()
-        assert c['server_port'] == 18599
-        assert c['vector_min_cos'] == 0.85
-        assert read_cfg() == text
-        assert 'vector_min_cos' in notices()['config_type']['message']
-
-    def test_bool_is_not_a_number(self):
-        assert not n3memory._config_value_ok('pair_top_n', True)
-        assert n3memory._config_value_ok('vector_min_cos', 1)
-        assert not n3memory._config_value_ok('version_order_enabled', 1)
-
-    def test_fixed_config_clears_notice(self):
-        write_cfg('{oops')
-        n3memory._load_config()
-        write_cfg('{' + IDS + '}')
-        n3memory._load_config()
-        assert 'config_unreadable' not in notices()
-
-    def test_code_version_tracks_config_content(self):
-        write_cfg('{' + IDS + ', "vector_min_cos": 0.85}')
-        v1 = n3memory._code_version()
-        write_cfg('{\n  "vector_min_cos": 0.85,\n  ' + IDS.replace(', ', ',\n  ') + '\n}')
-        assert n3memory._code_version() == v1
-        write_cfg('{' + IDS + ', "vector_min_cos": 0.83}')
-        assert n3memory._code_version() != v1
-
-
-# --------------------------------------------------------------------------- hooks
-
-
-# --------------------------------------------------------------------------- server decision
-def me():
-    return os.path.abspath(n3memory.HOME_DIR)
+def test_search_does_not_create_memory_context(tmp_path):
+    n3m.cmd_search("context")
+    assert not (tmp_path / "n3mc_home" / ".memory" / "memory_context.md").exists()
 
 
 class TestServerDecision:
-    def test_decisions(self):
-        cv = n3memory._code_version()
-        assert n3memory._health_decision(None) == 'none'
-        assert n3memory._health_decision({'status': 'ok'}) == 'legacy'
-        assert n3memory._health_decision({'status': 'ok', 'root': me(), 'code_version': cv}) == 'ok'
-        assert n3memory._health_decision({'status': 'ok', 'root': me(), 'code_version': 'old'}) == 'stale'
-        assert n3memory._health_decision({'status': 'ok', 'root': '/elsewhere/n3mc',
-                                          'code_version': cv}) == 'foreign'
+    def test_decisions(self, monkeypatch):
+        cv = n3m.compute_code_version()
+        assert n3m._health_decision(None) == "none"
+        assert n3m._health_decision({"status": "ok", "root": n3m.HOME_DIR, "code_version": cv}) == "ok"
+        assert n3m._health_decision({"status": "ok", "root": n3m.HOME_DIR, "code_version": "x"}) == "stale"
+        assert n3m._health_decision({"status": "ok", "root": "/elsewhere", "code_version": cv}) == "foreign"
+        assert n3m._health_decision({"status": "ok"}) == "legacy"
 
-    def test_stale_uses_shutdown_first(self, monkeypatch):
+    def test_code_version_changes_with_config_content_only(self):
+        n3m._load_config()
+        a = n3m.compute_code_version()
+        cfg = json.load(open(n3m.CONFIG_FILE))
+        open(n3m.CONFIG_FILE, "w").write(json.dumps(cfg, indent=8, sort_keys=True))
+        assert n3m.compute_code_version() == a
+        cfg["min_score"] = 0.3
+        open(n3m.CONFIG_FILE, "w").write(json.dumps(cfg))
+        assert n3m.compute_code_version() != a
+
+    def test_stale_server_stopped_with_shutdown_first(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(n3memory, '_request_shutdown', lambda c: calls.append('shutdown') or True)
-        monkeypatch.setattr(n3memory, '_wait_port_free', lambda c, *a, **k: True)
+        monkeypatch.setattr(n3m, "_get_health", lambda port=None: {"status": "ok", "root": n3m.HOME_DIR,
+                                                                    "code_version": "old", "pid": 1})
+        monkeypatch.setattr(n3m, "_request_shutdown", lambda *a, **k: calls.append("shutdown") or True)
+        monkeypatch.setattr(n3m, "_wait_port_free", lambda *a, **k: True)
+        monkeypatch.setattr(n3m, "_launch", lambda: calls.append("launch") or True)
+        assert n3m.ensure_server() is True and calls == ["shutdown", "launch"]
 
-        def no_kill(pid):
-            raise AssertionError('psutil path must not be used when /shutdown works')
-        monkeypatch.setattr(n3memory, '_is_own_server_process', no_kill)
-        assert n3memory._stop_stale_server({'server_port': 1}, {'pid': 4242}) is True
-        assert calls == ['shutdown']
+    def test_foreign_server_not_used_or_stopped(self, monkeypatch):
+        monkeypatch.setattr(n3m, "_get_health", lambda port=None: {"status": "ok", "root": "/other/home",
+                                                                    "code_version": "x", "pid": 1})
+        called = []
+        monkeypatch.setattr(n3m, "_request_shutdown", lambda *a, **k: called.append(1))
+        assert n3m.ensure_server() is False and n3m._FOREIGN_SERVER_ROOT == "/other/home" and not called
+        assert "port_conflict" in n3m._notices_read()
 
-    def test_unverifiable_old_server_not_stopped(self, monkeypatch):
-        monkeypatch.setattr(n3memory, '_is_own_server_process', lambda pid: False)
-        assert n3memory._stop_stale_server({'server_port': 1}, {'pid': 4242}) is False
-        assert 'stale_server' in notices()
+    def test_dead_pid_file_is_removed_without_waiting(self, monkeypatch):
+        open(n3m.PID_FILE, "w").write("999999")
+        monkeypatch.setattr(n3m, "_get_health", lambda port=None: None)
+        monkeypatch.setattr(n3m, "_launch", lambda: True)
+        t = time.time()
+        assert n3m.ensure_server() is True and time.time() - t < 5 and not os.path.exists(n3m.PID_FILE)
 
-    def test_legacy_unverifiable_is_treated_as_foreign(self, monkeypatch):
-        monkeypatch.setattr(n3memory, '_get_health', lambda c: {'status': 'ok'})
-        monkeypatch.setattr(n3memory, '_is_own_server_process', lambda pid: False)
-        monkeypatch.setattr(n3memory, '_listener_pid', lambda port: 4242)
+    def test_shutdown_endpoint_checks_root(self, use_fake_embed, monkeypatch):
+        monkeypatch.setattr(n3m, "_exit_server", lambda: None)
+        c = TestClient(n3m.create_app(), base_url="http://127.0.0.1:18526")
+        assert c.post("/shutdown", json={"root": "/wrong"}).status_code == 403
+        assert c.post("/shutdown", json={"root": n3m.HOME_DIR}).json() == {"status": "ok"}
 
-        def no_start(c):
-            raise AssertionError('must not start a server on an occupied port')
-        monkeypatch.setattr(n3memory, '_start_server', no_start)
-        assert n3memory.ensure_server({'server_port': 1}) is False
-        assert n3memory._FOREIGN_SERVER_ROOT
-
-    def test_dead_pid_file_does_not_wait(self, monkeypatch):
-        monkeypatch.setattr(n3memory, '_get_health', lambda c: None)
-        with open(n3memory.PID_FILE, 'w') as f:
-            f.write('999999')
-        monkeypatch.setattr(n3memory, '_wait_for_server',
-                            lambda *a, **k: (_ for _ in ()).throw(AssertionError('waited')))
-        started = []
-        monkeypatch.setattr(n3memory, '_start_server', lambda c: started.append(1) or True)
-        assert n3memory.ensure_server({'server_port': 1}) is True
-        assert started == [1]
-        assert not os.path.exists(n3memory.PID_FILE)
-
-    def test_shutdown_endpoint_checks_root(self, monkeypatch):
-        from fastapi.testclient import TestClient
-        exits = []
-        monkeypatch.setattr(n3memory, '_exit_server_process', lambda: exits.append(1))
-        client = TestClient(n3memory.app)
-        assert client.post('/shutdown', json={'root': '/elsewhere/n3mc'}).status_code == 403
-        assert client.post('/shutdown', json={'root': me()}).json()['status'] == 'ok'
-
-    def test_health_reports_identity(self):
-        from fastapi.testclient import TestClient
-        h = TestClient(n3memory.app).get('/health').json()
-        assert h['status'] == 'ok' and h['pid'] == os.getpid()
-        assert os.path.normcase(h['root']) == os.path.normcase(me())
-        assert len(h['code_version']) == 16
-
-
-class TestForeignServer:
-    @pytest.fixture
-    def foreign(self, tmp_path, monkeypatch):
-        path = new_db(tmp_path, 'own.db')
-        monkeypatch.setattr(n3memory, 'DB_PATH', path)
-        monkeypatch.setattr(n3memory, '_get_health',
-                            lambda c: {'status': 'ok', 'root': '/elsewhere/n3mc',
-                                       'code_version': 'x', 'pid': 1})
-        sent = []
-        monkeypatch.setattr(n3memory, '_post', lambda c, p, *a, **k: sent.append(p) or {})
-        return path, sent
-
-    def test_save_goes_to_own_db(self, foreign):
-        path, sent = foreign
-        n3memory.cmd_buffer('note for this folder', {'server_port': 1, 'owner_id': 'o'})
-        assert sent == []
-        assert count(path) == 1
-
-    def test_search_skipped(self, foreign, capsys):
-        path, sent = foreign
-        n3memory.cmd_search('anything', {'server_port': 1})
-        assert sent == []
-        assert 'memory search unavailable' in capsys.readouterr().out
-        assert 'port_conflict' in notices()
-
-    def test_repair_skipped(self, foreign):
-        path, sent = foreign
-        n3memory.cmd_repair({'server_port': 1})
-        assert sent == []
-
-
-# =========================================================================== v1.5.0
-# References captured at import time (before conftest replaces them per test).
-REAL_SPAWN_SERVER = n3memory._spawn_server
-REAL_CHECK_HOST = n3memory._check_host
-REAL_POST = n3memory._post
-REAL_GET = n3memory._get
-
-
-# --------------------------------------------------------------------------- FTS (v1.5.0)
-class TestFtsQuoting(TestFtsQuoting):  # v1.5.0 additions
-    def test_terms_joined_with_or(self, tmp_path):
-        path = new_db(tmp_path)
-        add(path, 'the quick brown fox jumps')
-        assert ' OR ' in fts_builder()('what quick fox doing')
-        conn = db.get_connection(path)
-        try:
-            rows = db.search_fts(conn, 'what is the quick fox doing in my DB')
-        finally:
-            conn.close()
-        assert len(rows) == 1
-
-    def test_short_terms_dropped(self):
-        assert fts_builder()('AI 東京') == ''
-        assert fts_builder()('AI 東京 tokyo') == '"tokyo"'
-
-    def test_max_40_terms(self):
-        # 2026-11-17: 30 → 40 (a Japanese sentence now becomes many grams)
-        q = ' '.join(f'term{i:02d}' for i in range(50))
-        assert fts_builder()(q).count(' OR ') == 39
-
-    def test_punctuation_splits_terms(self, tmp_path):
-        path = new_db(tmp_path)
-        add(path, '架空の惑星「アルファ9」の気温設定')
-        built = fts_builder()('「アルファ9」の気温は？')
-        # 2026-11-17: CJK words of 4+ chars are split into 3-char grams
-        assert built == ('"アルフ" OR "ルファ" OR "ファ9" OR "の気温" OR "気温は"')
-        conn = db.get_connection(path)
-        try:
-            rows = db.search_fts(conn, '「アルファ9」の気温は？')
-        finally:
-            conn.close()
-        assert len(rows) == 1
-
-
-# --------------------------------------------------------------------------- filter_score (v1.5.0)
-class TestSearchShaping(TestSearchShaping):  # v1.5.0 additions
-    def test_old_other_session_survives_relative_cut(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-        add(path, 'current session record', emb=at_cos(0.86), session_id='cur')
-        add(path, 'old record from another session', emb=at_cos(0.99, axis=2),
-            ts=old, session_id='other')
-        out = proc.hybrid_search(path, 'zzz', cfg(min_score=0.2), current_session_id='cur')
-        contents = [r['content'] for r in out['results']]
-        # the order is still by the final score: the current session first
-        assert contents == ['current session record', 'old record from another session']
-        assert out['results'][0]['score'] > out['results'][1]['score']
-
-    def test_keyword_only_other_session_survives_min_score(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        for i in range(40):
-            add(path, f'filler record number {i}')
-        add(path, 'a note about the zebrafish tank', session_id='other')
-        out = proc.hybrid_search(path, 'zebrafish', cfg(min_score=0.2),
-                                 current_session_id='cur')
-        res = out['results']
-        assert [r['content'] for r in res] == ['a note about the zebrafish tank']
-        assert res[0]['score'] < 0.2 <= res[0]['filter_score']
-
-    def test_filter_score_moves_with_version_position(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        rep = unit(0)
-        add(path, '[user] make it', emb=unit(5), ts='2026-01-01T00:00:00+00:00', turn_id='old')
-        add(path, '[claude 1/2] v1 ' + LONG, emb=rep, ts='2026-01-01T00:00:01+00:00',
-            turn_id='old')
-        add(path, '[user] make it again', emb=unit(6), ts='2026-01-02T00:00:00+00:00',
-            turn_id='new')
-        add(path, '[claude 1/2] v2 ' + LONG, emb=mix(rep, unit(3), 0.99, math.sqrt(1 - 0.99 ** 2)),
-            ts='2026-01-02T00:00:01+00:00', turn_id='new')
-        out = proc.hybrid_search(path, 'zzz', cfg(half_life_days=1e9))
-        res = out['results']
-        assert res[0]['turn_id'] == 'new'
-        assert res[0]['filter_score'] >= res[1]['filter_score']
-
-
-# --------------------------------------------------------------------------- server start (v1.5.0)
-class FakeProc:
-    def __init__(self, code=None, pid=4321):
-        self.code = code
-        self.pid = pid
-
-    def poll(self):
-        return self.code
+    def test_host_check_uses_the_servers_own_port(self, use_fake_embed, monkeypatch):
+        monkeypatch.setattr(n3m, "_SERVER_PORT", 19999)
+        c = TestClient(n3m.create_app(), base_url="http://127.0.0.1:19999")
+        assert c.get("/health").status_code == 200  # config.json says 18526, the server listens on 19999
 
 
 class TestServerStart:
-    def test_child_exit_stops_wait_and_notifies(self, monkeypatch):
-        monkeypatch.setattr(n3memory, '_get_health', lambda c: None)
-        monkeypatch.setattr(n3memory, '_spawn_server', lambda: FakeProc(code=3))
-        t0 = time.time()
-        assert n3memory.ensure_server({'server_port': 1}) is False
-        assert time.time() - t0 < 5
-        n = notices()['server_start_failed']['message']
-        assert 'exit code 3' in n and n3memory.SERVER_LOG in n
-        assert os.path.exists(n3memory.SERVER_START_FAILED_MARKER)
-        assert not os.path.exists(n3memory.PID_FILE)
+    def test_early_exit_is_reported_with_server_log(self, monkeypatch):
+        class Proc:
+            pid, returncode = 4242, 3
 
-    def test_no_retry_within_five_minutes(self, monkeypatch, capsys):
-        monkeypatch.setattr(n3memory, '_get_health', lambda c: None)
-        with open(n3memory.SERVER_START_FAILED_MARKER, 'w') as f:
-            f.write(str(time.time() - 60))
+            def poll(self):
+                return 3
 
-        def no_spawn():
-            raise AssertionError('must not start within 5 minutes of a failure')
-        monkeypatch.setattr(n3memory, '_spawn_server', no_spawn)
-        assert n3memory.ensure_server({'server_port': 1}) is False
-        n3memory._do_search('hello', {'server_port': 1})
-        assert 'memory search unavailable' in capsys.readouterr().out
+        monkeypatch.setattr(n3m, "_start_server", _real_start_server)
+        monkeypatch.setattr(n3m.subprocess, "Popen", lambda *a, **k: Proc())
+        monkeypatch.setattr(n3m, "_get_health", lambda port=None: None)
+        assert n3m._start_server() is False
+        assert "server_start_failed" in n3m._notices_read() and n3m.SERVER_LOG in n3m._notices_read()[
+            "server_start_failed"]["message"]
+        assert os.path.exists(n3m.SERVER_START_FAILED_FILE)
+        monkeypatch.setattr(n3m, "_start_server", lambda: (_ for _ in ()).throw(AssertionError("retried")))
+        assert n3m._launch() is False  # within 5 minutes: not tried again
 
-    def test_retry_after_five_minutes_and_success_clears(self, monkeypatch):
-        with open(n3memory.SERVER_START_FAILED_MARKER, 'w') as f:
-            f.write(str(time.time() - 301))
-        n3memory._notify('server_start_failed', 'old failure')
-        state = {'spawned': False}
+    def test_popen_gets_detach_flags_and_server_log(self, monkeypatch):
+        seen = {}
 
-        def health(c):
-            if not state['spawned']:
+        class Proc:
+            pid, returncode = 4243, None
+
+            def poll(self):
                 return None
-            return {'status': 'ok', 'root': me(), 'code_version': n3memory._code_version()}
 
-        def spawn():
-            state['spawned'] = True
-            return FakeProc(code=None)
-        monkeypatch.setattr(n3memory, '_get_health', health)
-        monkeypatch.setattr(n3memory, '_spawn_server', spawn)
-        assert n3memory.ensure_server({'server_port': 1}) is True
-        assert 'server_start_failed' not in notices()
-        assert not os.path.exists(n3memory.SERVER_START_FAILED_MARKER)
+        def fake_popen(cmd, **kw):
+            seen.update(cmd=cmd, **kw)
+            return Proc()
 
-    def test_still_starting_after_60s_not_replaced(self, monkeypatch, capsys):
-        monkeypatch.setattr(n3memory, '_get_health', lambda c: None)
-        with open(n3memory.PID_FILE, 'w') as f:
-            f.write(str(os.getpid()))
-        monkeypatch.setattr(n3memory, '_process_alive', lambda pid: True)
-        monkeypatch.setattr(n3memory, '_is_own_server_process', lambda pid: True)
-        monkeypatch.setattr(n3memory, '_wait_for_server', lambda *a, **k: False)
+        monkeypatch.setattr(n3m, "_start_server", _real_start_server)
+        monkeypatch.setattr(n3m.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(n3m, "SERVER_WAIT_SECONDS", 0)
+        n3m._start_server()
+        assert seen["cmd"][-3:] == ["-m", "n3memorycore_free_codex.n3memory", "--run-server"] or seen["cmd"][-1] == "--run-server"
+        if os.name == "nt":
+            assert seen["creationflags"] & n3m.subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            assert seen["start_new_session"] is True
+        assert seen["stderr"].name == n3m.SERVER_LOG
 
-        def no_start(c):
-            raise AssertionError('must not start a second server')
-        monkeypatch.setattr(n3memory, '_start_server', no_start)
-        assert n3memory.ensure_server({'server_port': 1}) is False
-        assert os.path.exists(n3memory.PID_FILE)
-        n3memory._do_search('hello', {'server_port': 1})
-        assert 'the memory server is still starting' in capsys.readouterr().out
+    # ---- 2026-11-22, review #5: the PID file is reserved before Popen
+    @staticmethod
+    def _proc(pid):
+        class Proc:
+            returncode = None
 
-    def test_still_starting_saves_directly(self, monkeypatch):
-        monkeypatch.setattr(n3memory, '_NO_SERVER_REASON', n3memory._STILL_STARTING)
+            def poll(self):
+                return None
+        p_ = Proc()
+        p_.pid = pid
+        return p_
 
-        def no_post(*a, **k):
-            raise AssertionError('must not post while the server is starting')
-        monkeypatch.setattr(n3memory, '_post', no_post)
-        n3memory._do_buffer('note', {'server_port': 1, 'owner_id': 'o'})
-        assert count(n3memory.DB_PATH) == 1
-
-    def test_without_psutil_young_pid_file_is_starting(self, monkeypatch):
-        monkeypatch.setattr(n3memory, '_psutil_available', lambda: False)
-        with open(n3memory.PID_FILE, 'w') as f:
-            f.write('999999')
-        assert n3memory._pid_file_process_starting(999999) is True
-        old = time.time() - 120
-        os.utime(n3memory.PID_FILE, (old, old))
-        assert n3memory._pid_file_process_starting(999999) is False
-
-    def test_popen_detached_and_stderr_to_server_log(self, monkeypatch):
-        monkeypatch.setattr(n3memory, '_spawn_server', REAL_SPAWN_SERVER)
-        with open(n3memory.SERVER_LOG, 'wb') as f:
-            f.write(b'x' * (n3memory._SERVER_LOG_MAX_BYTES + 10))
+    def test_two_concurrent_ensure_server_calls_popen_once(self, monkeypatch):
+        import threading
+        started = threading.Event()
         calls = []
 
-        def fake_popen(args, **kwargs):
-            calls.append((args, kwargs))
-            return FakeProc()
-        monkeypatch.setattr(n3memory.subprocess, 'Popen', fake_popen)
-        n3memory._spawn_server()
-        args, kw = calls[0]
-        assert args[1:] == ['-m', 'n3memorycore.n3memory', '--run-server']
-        assert os.path.normcase(kw['stderr'].name) == os.path.normcase(n3memory.SERVER_LOG)
-        assert kw['stdout'] == n3memory.subprocess.DEVNULL
-        assert kw['stdin'] == n3memory.subprocess.DEVNULL
-        if os.name == 'nt':
-            flags = kw['creationflags']
-            assert flags & n3memory.subprocess.CREATE_NEW_PROCESS_GROUP
-            assert flags & n3memory.subprocess.CREATE_NO_WINDOW
-        else:
-            assert kw['start_new_session'] is True
-        assert os.path.getsize(n3memory.SERVER_LOG) == 0   # truncated (> 1 MB)
+        def fake_popen(cmd, **kw):
+            calls.append(1)
+            time.sleep(0.5)  # the other call runs into the reservation meanwhile
+            started.set()
+            return self._proc(4242)
+
+        def health(port=None):
+            return ({"status": "ok", "root": n3m.HOME_DIR, "code_version": n3m.compute_code_version(), "pid": 4242}
+                    if started.is_set() else None)
+
+        n3m.get_config()
+        monkeypatch.setattr(n3m, "_start_server", _real_start_server)
+        monkeypatch.setattr(n3m.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(n3m, "_get_health", health)
+        monkeypatch.setattr(n3m, "_pid_is_own", lambda pid: True)  # the fake child is this folder's server
+        barrier, results = threading.Barrier(2), []
+
+        def run():
+            barrier.wait()
+            results.append(n3m.ensure_server())
+
+        ts = [threading.Thread(target=run) for _ in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(30)
+        assert results == [True, True] and len(calls) == 1
+        assert open(n3m.PID_FILE).read() == "4242"
+
+    def test_popen_failure_removes_the_reservation(self, monkeypatch):
+        monkeypatch.setattr(n3m, "_start_server", _real_start_server)
+        monkeypatch.setattr(n3m, "_get_health", lambda port=None: None)
+        monkeypatch.setattr(n3m, "SERVER_WAIT_SECONDS", 0)
+
+        def boom(*a, **k):
+            raise OSError("cannot spawn")
+
+        monkeypatch.setattr(n3m.subprocess, "Popen", boom)
+        assert n3m.ensure_server() is False and not os.path.exists(n3m.PID_FILE)
+        calls = []
+        monkeypatch.setattr(n3m.subprocess, "Popen", lambda *a, **k: calls.append(1) or self._proc(5151))
+        n3m.ensure_server()
+        assert calls == [1] and open(n3m.PID_FILE).read() == "5151"
+
+    def test_the_call_that_lost_never_rewrites_the_pid_file(self, monkeypatch):
+        open(n3m.PID_FILE, "w").write("777")
+        t0 = time.time() - 30
+        os.utime(n3m.PID_FILE, (t0, t0))
+        monkeypatch.setattr(n3m, "_start_server", _real_start_server)
+        monkeypatch.setattr(n3m, "_get_health", lambda port=None: None)
+        monkeypatch.setattr(n3m, "_pid_is_own", lambda pid: True)
+        monkeypatch.setattr(n3m, "_listen_ports", lambda pid: [])
+        monkeypatch.setattr(n3m, "SERVER_WAIT_SECONDS", 0)
+        monkeypatch.setattr(n3m.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("launched")))
+        assert n3m._start_server() is False and n3m._SERVER_STARTING is True
+        assert open(n3m.PID_FILE).read() == "777" and abs(os.path.getmtime(n3m.PID_FILE) - t0) < 1
+
+    def test_empty_pid_file_younger_than_60_s_counts_as_starting(self, monkeypatch):
+        open(n3m.PID_FILE, "w").close()
+        monkeypatch.setattr(n3m, "_start_server", _real_start_server)
+        monkeypatch.setattr(n3m, "_get_health", lambda port=None: None)
+        monkeypatch.setattr(n3m, "SERVER_WAIT_SECONDS", 0)
+        monkeypatch.setattr(n3m.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("launched")))
+        assert n3m.ensure_server() is False and n3m._SERVER_STARTING is True and os.path.exists(n3m.PID_FILE)
+        assert n3m._start_server() is False and open(n3m.PID_FILE).read() == ""
+        # older than 60 s: dead, removed, and the server is started
+        t0 = time.time() - 120
+        os.utime(n3m.PID_FILE, (t0, t0))
+        calls = []
+        monkeypatch.setattr(n3m.subprocess, "Popen", lambda *a, **k: calls.append(1) or self._proc(6161))
+        n3m.ensure_server()
+        assert calls == [1] and open(n3m.PID_FILE).read() == "6161"
 
 
-# --------------------------------------------------------------------------- server API (v1.5.0)
+_real_start_server = n3m._start_server
+
+
 class TestServerApi:
-    PORT = 18999
-
     @pytest.fixture
-    def client(self, tmp_path, monkeypatch):
-        from fastapi.testclient import TestClient
-        path = new_db(tmp_path, 'api.db')
-        monkeypatch.setattr(n3memory, 'DB_PATH', path)
-        monkeypatch.setattr(n3memory, '_srv_cfg', {'owner_id': 'o', 'local_id': 'l',
-                                                   'server_port': self.PORT})
-        monkeypatch.setattr(n3memory, '_host_ok', REAL_CHECK_HOST)
-        monkeypatch.setattr(proc, 'embed_passage', fake_embed)
-        return TestClient(n3memory.app), path
+    def app(self, use_fake_embed):
+        return n3m.create_app()
 
-    ENDPOINTS = [('get', '/health', None), ('post', '/buffer', {'content': 'x'}),
-                 ('post', '/search', {'query': 'x'}), ('post', '/repair', {}),
-                 ('get', '/list', None), ('post', '/shutdown', {'root': '/x'}),
-                 ('delete', '/delete/abc', None), ('post', '/gc', {}),
-                 ('post', '/import', {})]
+    def test_bad_host_403_everywhere(self, app):
+        c = TestClient(app, base_url="http://evil.example")
+        for m, path in (("get", "/health"), ("post", "/buffer"), ("post", "/search"), ("post", "/repair"),
+                        ("get", "/list")):
+            assert getattr(c, m)(path).status_code == 403
 
-    @pytest.mark.parametrize('method,url,body', ENDPOINTS)
-    def test_foreign_host_rejected(self, client, method, url, body):
-        c, _ = client
-        kw = {'headers': {'Host': 'evil.example'}}
-        if body is not None:
-            kw['json'] = body
-        assert getattr(c, method)(url, **kw).status_code == 403
+    def test_localhost_host_allowed(self, app):
+        assert TestClient(app, base_url="http://localhost:18526").get("/health").status_code == 200
 
-    @pytest.mark.parametrize('host', ['127.0.0.1:%d' % PORT, 'localhost:%d' % PORT])
-    def test_local_hosts_pass(self, client, host):
-        c, _ = client
-        assert c.get('/health', headers={'Host': host}).status_code == 200
-        assert c.get('/list', headers={'Host': host}).status_code == 200
+    def test_origin_header_403_even_with_good_host(self, app):
+        c = TestClient(app, base_url="http://127.0.0.1:18526")
+        assert c.get("/health", headers={"Origin": "http://evil.example"}).status_code == 403
+        assert c.get("/health", headers={"Origin": "null"}).status_code == 403
+        assert c.get("/health").status_code == 200
 
-    def test_wrong_port_rejected(self, client):
-        c, _ = client
-        assert c.get('/health', headers={'Host': '127.0.0.1:1'}).status_code == 403
-
-    def test_db_endpoints_are_plain_def(self):
+    def test_endpoints_are_plain_def(self, app):
         import inspect
-        eps = {r.path: r.endpoint for r in n3memory.app.routes if hasattr(r, 'endpoint')}
-        for p in ('/buffer', '/search', '/repair', '/list'):
-            assert not inspect.iscoroutinefunction(eps[p]), p
+        for r in app.routes:
+            if getattr(r, "path", "") in ("/buffer", "/search", "/repair", "/list"):
+                assert not inspect.iscoroutinefunction(r.endpoint)
 
-    def test_repair_max_records(self, client):
-        c, path = client
-        for i in range(250):
-            add(path, f'unindexed record {i}')       # no vector
-        h = {'Host': f'127.0.0.1:{self.PORT}'}
-        r = c.post('/repair', json={'max_records': 200}, headers=h)
-        assert r.json()['count'] == 200
-        conn = db.get_connection(path)
-        try:
-            assert len(db.find_unindexed_memories(conn, limit=1000)) == 50
-        finally:
-            conn.close()
-        assert c.post('/repair', json={}, headers=h).json()['count'] == 50
+    def test_repair_max_records(self, app, conn, cfg):
+        for i in range(5):
+            add(conn, cfg, f"unindexed {i}", embed=False)
+        c = TestClient(app, base_url="http://127.0.0.1:18526")
+        assert c.post("/repair", json={"max_records": 2}).json()["count"] == 2
+        assert c.post("/repair", json={}).json()["count"] == 3
 
-    def test_search_unreadable_since_is_400(self, client):
-        c, _ = client
-        r = c.post('/search', json={'query': 'x', 'since': 'yesterday'},
-                   headers={'Host': f'127.0.0.1:{self.PORT}'})
-        assert r.status_code == 400
-
-
-    def test_cli_sends_local_host_header(self, monkeypatch):
-        import urllib.request
+    def test_client_does_not_use_proxy_and_sends_no_origin(self, monkeypatch):
+        import http.server
+        import threading
         seen = []
 
-        class Resp:
-            def __enter__(self):
-                return self
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(dict(self.headers))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"status": "ok"}')
 
-            def __exit__(self, *a):
-                return False
+            def log_message(self, *a):
+                pass
 
-            def read(self):
-                return b'{}'
-
-        def fake_open(req, timeout=None):
-            seen.append(req.get_header('Host'))
-            return Resp()
-        monkeypatch.setattr(n3memory, '_local_open', fake_open)      # F16: no proxy
-        REAL_POST({'server_port': 18777}, '/x', {})
-        REAL_GET({'server_port': 18777}, '/x')
-        assert seen == ['127.0.0.1:18777', '127.0.0.1:18777']
-
-
-# --------------------------------------------------------------------------- config (v1.5.0)
-class TestConfig(TestConfig):  # v1.5.0 additions
-    @pytest.mark.parametrize('key,value', [
-        ('search_query_max_chars', '2000.0'), ('half_life_days', '0'),
-        ('server_port', '70000'), ('server_port', '-1'), ('min_score', '1.5'),
-    ])
-    def test_out_of_range_ignored(self, key, value):
-        write_cfg('{' + IDS + f', "{key}": {value}' + '}')
-        c = n3memory._load_config()
-        assert c[key] == n3memory._DEFAULT_CONFIG[key]
-        assert key in notices()['config_type']['message']
-
-    def test_valid_values_accepted(self):
-        assert n3memory._config_value_ok('half_life_days', 0.5)
-        assert n3memory._config_value_ok('server_port', 18600)
-        assert n3memory._config_value_ok('min_score', 0)
-        assert not n3memory._config_value_ok('pair_top_n', 3.0)
-
-    def test_exclusive_creation_reads_concurrent_file(self, monkeypatch):
-        other = ('{"owner_id": "33333333-3333-4333-8333-333333333333", '
-                 '"local_id": "44444444-4444-4444-8444-444444444444"}')
-        real_fill = n3memory._fill_ids
-
-        def racing_fill(c):
-            real_fill(c)
-            if not os.path.exists(n3memory.CONFIG_FILE):
-                write_cfg(other)          # another hook wins the race
-        monkeypatch.setattr(n3memory, '_fill_ids', racing_fill)
-        c = n3memory._load_config()
-        assert c['owner_id'] == '33333333-3333-4333-8333-333333333333'
-        assert json.loads(read_cfg())['owner_id'] == '33333333-3333-4333-8333-333333333333'
-
-    def test_missing_file_created_exclusively(self, monkeypatch):
-        import builtins
-        modes = []
-        real_open = builtins.open
-
-        def spy(file, mode='r', *a, **k):
-            if os.path.normcase(str(file)) == os.path.normcase(n3memory.CONFIG_FILE):
-                modes.append(mode)
-            return real_open(file, mode, *a, **k)
-        monkeypatch.setattr(builtins, 'open', spy)
-        n3memory._load_config()
-        assert modes and modes[0] == 'x'
-
-    def test_update_uses_replace(self, monkeypatch):
-        write_cfg('{' + IDS + '}')
-        replaced = []
-        real_replace = os.replace
-
-        def spy(src, dst):
-            replaced.append((src, dst))
-            return real_replace(src, dst)
-        monkeypatch.setattr(os, 'replace', spy)
-        n3memory._load_config()
-        assert any(os.path.normcase(d) == os.path.normcase(n3memory.CONFIG_FILE)
-                   and os.path.dirname(s) == os.path.dirname(d) for s, d in replaced)
-        assert 'server_port' in json.loads(read_cfg())
-
-    def test_notices_written_atomically(self, monkeypatch):
-        replaced = []
-        real_replace = os.replace
-        monkeypatch.setattr(os, 'replace', lambda s, d: replaced.append(d) or real_replace(s, d))
-        n3memory._notify('stale_server', 'msg')
-        assert n3memory.NOTICES_FILE in replaced
+        real_get = n3m._http  # not the patched _get
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        proxy = http.server.HTTPServer(("127.0.0.1", 0), H)
+        for s in (srv, proxy):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.server_port}")
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+        assert real_get("GET", "/health", port=srv.server_port) == {"status": "ok"}
+        srv.shutdown()
+        proxy.shutdown()
+        assert len(seen) == 1 and "Origin" not in seen[0]
 
 
-# --------------------------------------------------------------------------- purify before chunk (v1.5.0)
+class TestForeignServer:
+    def test_saves_go_to_own_db_directly_and_search_is_off(self, conn, monkeypatch, capsys):
+        monkeypatch.setattr(n3m, "_SERVER_OK", False)
+        monkeypatch.setattr(n3m, "_FOREIGN_SERVER_ROOT", "/other")
+        assert n3m._save_record("[user] direct save")["status"] == "ok"
+        assert db.count_memories(conn) == 1 and conn.execute("SELECT COUNT(*) FROM memories_vec").fetchone()[0] == 0
+        n3m.cmd_search("direct save")
+        assert "memory search unavailable: another N3MC folder's server is using port" in capsys.readouterr().out
+
+    def test_repair_does_nothing(self, monkeypatch, capsys):
+        monkeypatch.setattr(n3m, "_SERVER_OK", False)
+        monkeypatch.setattr(n3m, "_FOREIGN_SERVER_ROOT", "/other")
+        assert n3m.cmd_repair() == 0 and "skipped" in capsys.readouterr().err
+
+
+class TestConfig:
+    def test_unreadable_config_is_not_overwritten(self):
+        os.makedirs(n3m.HOME_DIR, exist_ok=True)
+        open(n3m.CONFIG_FILE, "w").write("{ not json")
+        os.utime(n3m.CONFIG_FILE, (1, 1))
+        cfg = n3m._load_config()
+        assert open(n3m.CONFIG_FILE).read() == "{ not json" and cfg["server_port"] == 18526
+        assert "config_unreadable" in n3m._notices_read()
+
+    def test_bad_values_ignored_individually(self):
+        n3m._load_config()
+        cfg = json.load(open(n3m.CONFIG_FILE))
+        cfg.update({"vector_min_cos": "0.83", "search_query_max_chars": 2000.0, "half_life_days": 0,
+                    "server_port": 70000, "min_score": 1.5, "min_results": -1, "search_result_limit": 1366,
+                    "pair_top_n": 5})
+        open(n3m.CONFIG_FILE, "w").write(json.dumps(cfg))
+        out = n3m._load_config()
+        assert out["vector_min_cos"] == n3m.DEFAULT_CONFIG["vector_min_cos"] and out["search_query_max_chars"] == 2000 and out["half_life_days"] == 90
+        assert out["server_port"] == 18526 and out["min_score"] == 0.2 and out["min_results"] == 3
+        assert out["search_result_limit"] == 20 and out["pair_top_n"] == 5
+        assert json.load(open(n3m.CONFIG_FILE))["vector_min_cos"] == "0.83"  # file not rewritten
+        msg = n3m._notices_read()["config_type"]["message"]
+        assert all(k in msg for k in ("vector_min_cos", "half_life_days", "search_result_limit"))
+
+    def test_accepts_boundaries_and_fix_clears_notice(self):
+        n3m._load_config()
+        cfg = json.load(open(n3m.CONFIG_FILE))
+        cfg.update({"min_results": 0, "search_result_limit": 1365})
+        open(n3m.CONFIG_FILE, "w").write(json.dumps(cfg))
+        out = n3m._load_config()
+        assert out["min_results"] == 0 and out["search_result_limit"] == 1365
+        assert "config_type" not in n3m._notices_read()
+
+    def test_k_4095_vector_search_works(self, conn, cfg):
+        add(conn, cfg, "a")
+        assert db.search_vector(conn, fake_embed("a"), k=4095)
+
+    def test_exclusive_create_keeps_the_winners_ids(self, monkeypatch):
+        n3m._load_config()
+        first = json.load(open(n3m.CONFIG_FILE))["owner_id"]
+        monkeypatch.setattr(n3m, "_CFG_CACHE", None)
+        assert n3m._load_config()["owner_id"] == first
+
+    def test_ids_recovered_from_db(self, conn, cfg):
+        os.unlink(n3m.CONFIG_FILE)
+        add(conn, cfg, "x")
+        assert n3m._load_config()["owner_id"] == cfg["owner_id"]
+
+    def test_update_goes_through_os_replace(self, monkeypatch):
+        n3m._load_config()
+        cfg = json.load(open(n3m.CONFIG_FILE))
+        del cfg["min_results"]
+        open(n3m.CONFIG_FILE, "w").write(json.dumps(cfg))
+        seen = []
+        real = os.replace
+        monkeypatch.setattr(os, "replace", lambda a, b: seen.append(b) or real(a, b))
+        n3m._load_config()
+        assert n3m.CONFIG_FILE in seen and json.load(open(n3m.CONFIG_FILE))["min_results"] == 3
+
+    # ---- 2026-11-22, review #2: filling in the IDs of an existing file is serialized
+    def test_concurrent_fill_in_ends_with_the_ids_on_disk(self, monkeypatch):
+        import threading
+        os.makedirs(n3m.HOME_DIR, exist_ok=True)
+        open(n3m.CONFIG_FILE, "w").write(json.dumps({"min_score": 0.3, "my_own_note": "keep me"}))
+        barrier, local = threading.Barrier(2), threading.local()
+        real_read = n3m._read_config_file
+
+        def read():
+            out = real_read()
+            if not getattr(local, "seen", False):  # both calls read the file without IDs first
+                local.seen = True
+                barrier.wait(10)
+            return out
+
+        monkeypatch.setattr(n3m, "_read_config_file", read)
+        results = []
+        ts = [threading.Thread(target=lambda: results.append(n3m._load_config())) for _ in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(30)
+        disk = json.load(open(n3m.CONFIG_FILE))
+        assert len(results) == 2
+        for r in results:
+            assert (r["owner_id"], r["local_id"]) == (disk["owner_id"], disk["local_id"])
+        assert disk["min_score"] == 0.3 and disk["my_own_note"] == "keep me"
+        assert not os.path.exists(os.path.join(n3m.MEMORY_DIR, "config.lock"))
+
+    def test_stale_config_lock_is_removed(self):
+        os.makedirs(n3m.HOME_DIR, exist_ok=True)
+        open(n3m.CONFIG_FILE, "w").write(json.dumps({"min_score": 0.3}))
+        lock = os.path.join(n3m.MEMORY_DIR, "config.lock")
+        open(lock, "w").write("1")
+        os.utime(lock, (time.time() - 60, time.time() - 60))
+        t = time.time()
+        cfg = n3m._load_config()
+        assert time.time() - t < 5 and json.load(open(n3m.CONFIG_FILE))["owner_id"] == cfg["owner_id"]
+        assert not os.path.exists(lock)
+
+    # ---- 2026-11-22, review #9: the server's code_version comes from the content it loaded
+    def _run_server(self, monkeypatch):
+        import uvicorn
+        monkeypatch.setattr(uvicorn, "run", lambda app, **k: None)
+        monkeypatch.setattr(n3m._processor, "get_model", lambda name=None: object())
+        monkeypatch.setattr(n3m, "_CFG_CACHE", None)
+        monkeypatch.setattr(n3m, "_SERVER_STATE", {})
+        assert n3m.cmd_run_server() == 0
+        return {"status": "ok", "root": n3m.HOME_DIR, "code_version": n3m._SERVER_STATE["code_version"]}
+
+    def test_server_code_version_equals_client_after_fill_in(self, monkeypatch):
+        os.makedirs(n3m.HOME_DIR, exist_ok=True)
+        open(n3m.CONFIG_FILE, "w").write(json.dumps({"min_score": 0.3}))  # no IDs: the server fills them in
+        h = self._run_server(monkeypatch)
+        assert "owner_id" in json.load(open(n3m.CONFIG_FILE))
+        assert h["code_version"] == n3m.compute_code_version() and n3m._health_decision(h) == "ok"
+        assert n3m._health_decision(self._run_server(monkeypatch)) == "ok"  # nothing changed: same value
+
+    def test_change_right_after_the_server_read_makes_it_stale(self, monkeypatch):
+        n3m._load_config()
+        real_read = n3m._read_config_file
+
+        def read_then_edit():
+            out = real_read()
+            d = json.load(open(n3m.CONFIG_FILE))
+            d["min_score"] = 0.35
+            open(n3m.CONFIG_FILE, "w").write(json.dumps(d))
+            return out
+
+        monkeypatch.setattr(n3m, "_read_config_file", read_then_edit)
+        h = self._run_server(monkeypatch)
+        assert n3m._SERVER_STATE["cfg"]["min_score"] == 0.2 and n3m._health_decision(h) == "stale"
+        monkeypatch.setattr(n3m, "_read_config_file", real_read)
+        h = self._run_server(monkeypatch)  # the restart
+        assert n3m._SERVER_STATE["cfg"]["min_score"] == 0.35 and n3m._health_decision(h) == "ok"
+
+
 class TestPurifyBeforeChunk:
-    def hook_saved(self, monkeypatch, text):
-        saved = []
-        monkeypatch.setattr(codex_entry, 'MEMORY_DIR', n3memory.MEMORY_DIR)
-        monkeypatch.setattr(n3memory, '_load_config',
-                            lambda: {'server_port': 1, 'search_query_max_chars': 2000})
-        monkeypatch.setattr(n3memory, 'ensure_server', lambda c: True)
-        monkeypatch.setattr(n3memory, '_post', lambda c, p, *a, **k: (
-            {'results': [], 'pairs': {}, 'pairs_omitted': {}} if p == '/search' else {}))
-        monkeypatch.setattr(n3memory, '_do_buffer',
-                            lambda t, c, **k: saved.append(t))
-        codex_entry._handle('--prompt', {'session_id': 's', 'turn_id': 't', 'prompt': text})
-        return '\n'.join(saved)
-
-    def test_prose_between_code_blocks_kept(self, monkeypatch):
-        text = ('Intro prose sentence number one. ' * 5 +
-                '\n```\nCODE_ONE_' + 'a' * 120 + '\n```\n' +
-                'MIDDLE PROSE stays here. ' * 4 +
-                '\n```\nCODE_TWO_' + 'b' * 120 + '\n```\n' +
-                'Closing prose sentence. ' * 3)
+    def test_text_between_two_code_blocks_survives(self, conn):
+        text = "intro " * 20 + "\n```\n" + "code1\n" * 20 + "```\n" + "middle sentence stays. " * 12 + \
+               "\n```\n" + "code2\n" * 20 + "```\n" + "outro"
         assert len(text) > 500
-        joined = self.hook_saved(monkeypatch, text)
-        assert 'MIDDLE PROSE stays here.' in joined
-        assert 'CODE_ONE_' not in joined and 'CODE_TWO_' not in joined
-        assert '[code omitted]' in joined
+        n3m._save_text("user", text, "T")
+        stored = " ".join(r[0] for r in conn.execute("SELECT content FROM memories"))
+        assert "middle sentence stays." in stored and "code1" not in stored and "code2" not in stored
 
-    def test_long_code_block_replaced(self, monkeypatch):
-        text = 'Look at this:\n```\n' + 'LONGCODE line\n' * 60 + '```\nThanks.'
-        joined = self.hook_saved(monkeypatch, text)
-        assert 'LONGCODE' not in joined
-        assert '[code omitted]' in joined and 'Thanks.' in joined
+    def test_long_code_block_not_stored(self, conn):
+        n3m._save_text("user", "before\n```\n" + "x = 1\n" * 200 + "```\nafter", "T")
+        stored = " ".join(r[0] for r in conn.execute("SELECT content FROM memories"))
+        assert "x = 1" not in stored and "[code omitted]" in stored
 
 
-# --------------------------------------------------------------------------- sentences (v1.5.0)
 class TestChunkSentences:
-    def test_japanese_split_after_sentence_marks(self):
-        sents = ['これは長い日本語の文章の一部であり、空行なしで続いていきます' + str(i) + m
-                 for i, m in zip(range(18), '。！？' * 6)]
-        text = ''.join(sents)
-        assert len(text) > 400 and '\n' not in text
-        chunks = proc.chunk_text(text)
-        assert len(chunks) > 1
-        for c in chunks:
-            assert c[-1] in '。！？'
-
-
-# --------------------------------------------------------------------------- time bounds (v1.5.0)
-JST = timezone(timedelta(hours=9))
+    def test_japanese_text_splits_after_sentence_ends(self):
+        text = "".join(f"これは{i}番目の文章です。" for i in range(80))
+        chunks = p.chunk_text(text)
+        assert len(chunks) > 1 and all(len(c) <= 400 for c in chunks)
+        assert chunks[0].endswith("。")  # cut after a sentence end, not in the middle of a sentence
 
 
 class TestTimeBounds:
-    @pytest.fixture(autouse=True)
-    def jst(self, monkeypatch):
-        monkeypatch.setattr(n3memory, '_LOCAL_TZ', JST)
+    def test_date_only_since_is_local_midnight_in_utc(self):
+        want = datetime(2026, 11, 13).astimezone(timezone.utc).isoformat()
+        assert n3m._parse_time_bound("2026-11-13") == want
 
-    def test_date_only_is_local_midnight(self):
-        assert n3memory._parse_time_bound('2026-11-13') == '2026-11-12T15:00:00+00:00'
-        assert (n3memory._parse_time_bound('2026-11-13', is_until=True)
-                == '2026-11-13T14:59:59.999999+00:00')
+    def test_until_is_end_of_day(self):
+        want = datetime(2026, 11, 13, 23, 59, 59, 999999).astimezone(timezone.utc).isoformat()
+        assert n3m._parse_time_bound("2026-11-13", upper=True) == want
 
-    def test_offset_honoured(self):
-        assert n3memory._parse_time_bound('2026-11-13T09:00+00:00') == '2026-11-13T09:00:00+00:00'
-        assert n3memory._parse_time_bound('2026-11-13T09:00Z') == '2026-11-13T09:00:00+00:00'
+    def test_offset_is_kept(self):
+        assert n3m._parse_time_bound("2026-11-13T09:00+09:00") == "2026-11-13T00:00:00+00:00"
+        assert n3m._parse_time_bound("2026-11-13T00:00:00Z") == "2026-11-13T00:00:00+00:00"
 
     def test_t_and_space_same(self):
-        a = n3memory._parse_time_bound('2026-11-13T09:00:00')
-        b = n3memory._parse_time_bound('2026-11-13 09:00:00')
-        assert a == b == '2026-11-13T00:00:00+00:00'
+        assert n3m._parse_time_bound("2026-11-13T09:00") == n3m._parse_time_bound("2026-11-13 09:00")
 
-    def test_morning_record_found_by_local_date(self, tmp_path):
-        path = new_db(tmp_path)
-        add(path, 'saved at 08:00 JST on the 13th', ts='2026-11-12T23:00:00.123456+00:00')
-        since, until = n3memory._parse_time_range('2026-11-13', '2026-11-13')
-        conn = db.get_connection(path)
-        try:
-            rows = db.get_all_memories(conn, since=since, until=until)
-        finally:
-            conn.close()
-        assert len(rows) == 1
-
-    @pytest.mark.parametrize('argv,msg', [
-        (['--search', 'x', '--since', 'yesterday'], "--since: cannot read 'yesterday'"),
-        (['--list', '--until', '2026-13-01'], "--until: cannot read '2026-13-01'"),
-        (['--list', '--since', '2026-11-14', '--until', '2026-11-13'],
-         '--since is later than --until'),
-    ])
-    def test_unreadable_exits_2(self, monkeypatch, capsys, argv, msg):
-        monkeypatch.setattr('sys.argv', ['n3mc'] + argv)
-
-        def no_config():
-            raise AssertionError('must exit before doing anything')
-        monkeypatch.setattr(n3memory, '_load_config', no_config)
-        with pytest.raises(SystemExit) as ei:
-            n3memory.main()
-        assert ei.value.code == 2
-        assert msg in capsys.readouterr().err
+    def test_garbage_exits_2_with_one_line(self, capsys):
+        assert n3m.cmd_search("x", since="yesterday") == 2
+        assert "--since: cannot read 'yesterday' (use 2026-11-13 or 2026-11-13T09:00)" in capsys.readouterr().err
+        assert n3m.cmd_list(until="2026-13-01") == 2
+        assert "--until: cannot read '2026-13-01'" in capsys.readouterr().err
+        assert n3m.cmd_list(since="2026-12-01", until="2026-11-01") == 2
 
 
-# --------------------------------------------------------------------------- DB corruption (v1.5.0)
 class TestDbCorrupt:
-    def _make_files(self):
-        for sfx, data in (('', b'db'), ('-wal', b'wal'), ('-shm', b'shm')):
-            with open(n3memory.DB_PATH + sfx, 'wb') as f:
-                f.write(data)
+    def _make_db(self):
+        c = n3m._open_db()
+        c.execute("INSERT INTO memories(id, content, timestamp, owner_id) VALUES ('1','x','t','o')")
+        c.commit()
+        c.close()
 
-    def test_two_corruptions_two_backups_with_sidecars(self):
-        import re
-        self._make_files()
-        first = n3memory._handle_corrupt_db()
-        self._make_files()
-        second = n3memory._handle_corrupt_db()
-        assert first != second
-        pat = re.compile(r'^n3memory\.db\.corrupt-\d{14}(-\d+)?\.bak$')
-        for b, in_db in ((first, b'db'), (second, b'db')):
-            assert pat.match(os.path.basename(b))
-            with open(b, 'rb') as f:
-                assert f.read() == in_db
-            with open(b + '-wal', 'rb') as f:
-                assert f.read() == b'wal'
-            assert os.path.exists(b + '-shm')
-        assert not os.path.exists(n3memory.DB_PATH + '-wal')
-        assert 'db_corrupt' in notices()
-        assert second in notices()['db_corrupt']['message']
+    def test_garbage_file_is_set_aside_and_noticed(self):
+        open(n3m.DB_PATH, "wb").write(b"this is not a sqlite database" * 100)
+        c = n3m._open_db("integrity_check")
+        assert db.count_memories(c) == 0
+        c.close()
+        baks = [f for f in os.listdir(n3m.MEMORY_DIR) if ".corrupt-" in f and f.endswith(".bak")]
+        assert len(baks) == 1 and "db_corrupt" in n3m._notices_read()
+
+    def test_second_corruption_keeps_both_backups_and_wal_moves(self):
+        for _ in range(2):
+            for ext, data in (("", b"junk"), ("-wal", b"wal"), ("-shm", b"shm")):
+                open(n3m.DB_PATH + ext, "wb").write(data)
+            n3m._quarantine_db()
+        names = os.listdir(n3m.MEMORY_DIR)
+        baks = sorted(f for f in names if ".corrupt-" in f and f.endswith(".bak"))
+        assert len(baks) == 2 and baks[0].endswith("-2.bak") or baks[1].endswith("-2.bak")
+        assert len([f for f in names if f.endswith(".bak-wal")]) == 2 and len([f for f in names if f.endswith(".bak-shm")]) == 2
+        assert not os.path.exists(n3m.DB_PATH + "-wal")
 
     def test_quick_check_once_per_process(self, monkeypatch):
-        calls = []
-        real_get = n3memory.get_connection
+        seen = []
+        real = n3m._connect_checked
+        monkeypatch.setattr(n3m, "_connect_checked", lambda pragma=None: seen.append(pragma) or real(pragma))
+        for _ in range(3):
+            n3m._open_db_direct().close()
+        assert seen == ["quick_check", None, None]
 
-        class Spy:
-            def __init__(self, c):
-                self._c = c
+    def test_operational_error_is_not_corruption(self):
+        assert not n3m._is_corruption_error(sqlite3.OperationalError("database is locked"))
+        assert not n3m._is_corruption_error(RuntimeError("sqlite-vec ... Recovery: pip install sqlite-vec"))
+        assert n3m._is_corruption_error(sqlite3.DatabaseError("file is not a database"))
+        assert n3m._is_corruption_error(sqlite3.DatabaseError("database disk image is malformed"))
 
-            def execute(self, sql, *a):
-                if 'quick_check' in sql:
-                    calls.append(1)
-                return self._c.execute(sql, *a)
-
-            def __getattr__(self, name):
-                return getattr(self._c, name)
-
-        monkeypatch.setattr(n3memory, 'get_connection', lambda p: Spy(real_get(p)))
-        c = {'owner_id': 'o'}
-        for i in range(3):
-            n3memory._buffer_direct(f'chunk {i}', c)
-        assert len(calls) == 1
-        assert count(n3memory.DB_PATH) == 3
-
-    def test_quick_check_failure_sets_db_aside(self, monkeypatch):
-        real_get = n3memory.get_connection
-        state = {'n': 0}
-
-        class Cur:
-            def fetchone(self):
-                return ('*** in database main *** page 3 corrupt',)
-
-        class Bad:
-            def __init__(self, c):
-                self._c = c
-
-            def execute(self, sql, *a):
-                if 'quick_check' in sql:
-                    return Cur()
-                return self._c.execute(sql, *a)
-
-            def __getattr__(self, name):
-                return getattr(self._c, name)
-
-        def get(p):
-            state['n'] += 1
-            conn = real_get(p)
-            return Bad(conn) if state['n'] == 1 else conn
-        monkeypatch.setattr(n3memory, 'get_connection', get)
-        n3memory._buffer_direct('after corruption', {'owner_id': 'o'})
-        backups = [p for p in os.listdir(n3memory.MEMORY_DIR) if '.corrupt-' in p]
-        assert any(p.endswith('.bak') for p in backups)
-        assert 'db_corrupt' in notices()
-        assert count(n3memory.DB_PATH) == 1
+    def test_direct_save_after_corruption_works(self):
+        open(n3m.DB_PATH, "wb").write(b"junk" * 1000)
+        assert n3m._buffer_direct("[user] after corruption")["status"] == "ok"
 
 
-# --------------------------------------------------------------------------- --init (v1.5.0)
-PRO_HOOK = 'python "C:/N3MC-Pro_X/N3MemoryCore/n3mc_hook.py"'
+class TestSaveFailedNotice:
+    """A save through the server that ends ok / skipped clears save_failed (2026-11-22, F2)."""
+
+    def _keys(self):
+        if not os.path.exists(n3m.NOTICES_FILE):
+            return set()
+        return set(json.load(open(n3m.NOTICES_FILE, encoding="utf-8")))
+
+    @pytest.mark.parametrize("status", ["ok", "skipped"])
+    def test_server_save_clears_save_failed(self, monkeypatch, status):
+        n3m._notify("save_failed", "A record could not be saved (test).")
+        assert "save_failed" in self._keys()
+        monkeypatch.setattr(n3m, "_use_server", lambda: True)
+        monkeypatch.setattr(n3m, "_post", lambda path, body, *a, **k: {"status": status, "count": 1})
+        assert n3m._save_record("[user] hello", turn_id="T1")["status"] == status
+        assert "save_failed" not in self._keys()
 
 
-class TestInit:
-    @staticmethod
-    def expected_command(flag):
-        return f'C:/fake/Python/python.exe -I -m n3memorycore.codex_entry {flag}'
-
-    @pytest.fixture
-    def settings(self, tmp_path, monkeypatch):
-        path = tmp_path / 'codex' / 'hooks.json'
-        path.parent.mkdir()
-        monkeypatch.setenv('N3MC_CODEX_HOOKS_PATH', str(path))
-        monkeypatch.setattr(n3memory.sys, 'executable', 'C:/fake/Python/python.exe')
-        return path
-
-    def own_cmds(self, data, event):
-        return [h['command'] for e in data['hooks'][event] for h in e['hooks']
-                if 'n3memorycore.codex_entry' in h['command']]
-
-    def test_pro_hook_kept_and_trust_reminder(self, settings, capsys):
-        settings.write_text(json.dumps({'hooks': {'UserPromptSubmit': [
-            {'hooks': [{'type': 'command', 'command': PRO_HOOK}]}]}}), encoding='utf-8')
-        assert n3memory.cmd_init() == 0
-        data = json.loads(settings.read_text(encoding='utf-8'))
-        cmds = [h['command'] for e in data['hooks']['UserPromptSubmit'] for h in e['hooks']]
-        assert PRO_HOOK in cmds
-        assert self.own_cmds(data, 'UserPromptSubmit') == [
-            self.expected_command('--prompt')]
-        assert '/hooks' in capsys.readouterr().out
-
-    def test_own_forms_replaced_not_duplicated(self, settings):
-        old = ['C:/old/python.exe -m n3memorycore.codex_entry --prompt',
-               'python -m n3memorycore.codex_entry --prompt']
-        settings.write_text(json.dumps({'hooks': {
-            'UserPromptSubmit': [{'hooks': [{'type': 'command', 'command': c}]} for c in old],
-            'Stop': [{'hooks': [{'type': 'command',
-                                 'command': 'python -m n3memorycore.codex_entry --stop'}]}],
-        }}), encoding='utf-8')
-        assert n3memory.cmd_init() == 0
-        data = json.loads(settings.read_text(encoding='utf-8'))
-        assert self.own_cmds(data, 'UserPromptSubmit') == [
-            self.expected_command('--prompt')]
-        assert self.own_cmds(data, 'Stop') == [
-            self.expected_command('--stop')]
-        assert len(data['hooks']['UserPromptSubmit']) == 1
-
-    def test_rerun_writes_nothing(self, settings, capsys):
-        settings.write_text('{"custom": "x"}', encoding='utf-8')
-        assert n3memory.cmd_init() == 0
-        first = settings.read_bytes()
-        backups = sorted(p for p in os.listdir(settings.parent) if '.bak-n3mc-' in p)
-        assert len(backups) == 1
-        assert (settings.parent / backups[0]).read_text(encoding='utf-8') == '{"custom": "x"}'
-        capsys.readouterr()
-        assert n3memory.cmd_init() == 0
-        assert settings.read_bytes() == first
-        assert sorted(p for p in os.listdir(settings.parent) if '.bak-n3mc-' in p) == backups
-        assert 'Already registered' in capsys.readouterr().out
-
-    def test_invalid_settings_untouched_exit_1(self, settings):
-        for invalid in ('{"hooks": [,]}', '{"hooks": {"Stop": "invalid"}}'):
-            settings.write_text(invalid, encoding='utf-8')
-            assert n3memory.cmd_init() == 1
-            assert settings.read_text(encoding='utf-8') == invalid
-        assert not [p for p in os.listdir(settings.parent) if '.bak-n3mc-' in p]
-
-    def test_main_exit_status_1(self, settings, monkeypatch):
-        settings.write_text('not json', encoding='utf-8')
-        monkeypatch.setattr('sys.argv', ['n3mc', '--init'])
-        with pytest.raises(SystemExit) as ei:
-            n3memory.main()
-        assert ei.value.code == 1
-
-    def test_codex_init_and_stop_do_not_modify_project_files(self, settings, tmp_path, monkeypatch):
-        claude_dir = stop_in(tmp_path, monkeypatch)
-        rule = claude_dir / 'rules' / 'n3mc-behavior.md'
-        rule.write_text('# rules of another tool\n', encoding='utf-8')
-        md = claude_dir / 'CLAUDE.md'
-        md.write_text('@.memory/memory_context.md\n', encoding='utf-8')
-        before = {p: p.read_bytes() for p in (rule, md)}
-        assert n3memory.cmd_init() == 0
-        n3memory.cmd_stop({})
-        assert {p: p.read_bytes() for p in (rule, md)} == before
-        assert sorted(os.listdir(tmp_path / 'proj')) == ['.claude']
-
-    def test_other_configuration_is_preserved(self, settings):
-        original = {'permissions': {'allow': ['custom'], 'deny': ['another']}}
-        settings.write_text(json.dumps(original), encoding='utf-8')
-        assert n3memory.cmd_init() == 0
-        assert json.loads(settings.read_text(encoding='utf-8'))['permissions'] == original['permissions']
-
-
-# --------------------------------------------------------------------------- housekeeping (v1.5.0)
-class TestHousekeeping:
-    def test_stop_housekeeping(self, tmp_path, monkeypatch, capsys):
-        stop_in(tmp_path, monkeypatch)
-        old = os.path.join(n3memory.MEMORY_DIR, 'turn_id_old.txt')
-        new = os.path.join(n3memory.MEMORY_DIR, 'turn_id_new.txt')
-        for p in (old, new):
-            with open(p, 'w') as f:
-                f.write('t')
-        t = time.time() - 31 * 86400
-        os.utime(old, (t, t))
-        with open(n3memory.AUDIT_LOG, 'w', encoding='utf-8') as f:
-            f.write('x' * 100)
-        monkeypatch.setattr(n3memory, '_AUDIT_LOG_MAX_BYTES', 50)
-        n3memory.cmd_stop({})
-        assert not os.path.exists(old) and os.path.exists(new)
-        assert os.path.exists(n3memory.AUDIT_LOG + '.1')
-        assert not os.path.exists(n3memory.AUDIT_LOG)
-        assert 'Physical save failed' not in capsys.readouterr().err
-
-    def test_stop_reports_housekeeping_failure(self, tmp_path, monkeypatch, capsys):
-        stop_in(tmp_path, monkeypatch)
-
-        def boom():
-            raise OSError('disk full')
-        monkeypatch.setattr(n3memory, '_housekeeping', boom)
-        n3memory.cmd_stop({})
-        err = capsys.readouterr().err
-        assert 'disk full' in err
-        assert '--stop housekeeping failed' in err
-
-
-# --------------------------------------------------------------------------- model retry (v1.5.0)
 class TestModelRetry:
-    @pytest.fixture(autouse=True)
-    def fresh(self, monkeypatch):
-        for attr, val in (('_model', None), ('_model_name', None),
-                          ('_configured_model', None), ('_model_failed_at', None),
-                          ('_model_failed_error', None)):
-            monkeypatch.setattr(proc, attr, val)
-
-    def test_no_retry_for_60_seconds(self, monkeypatch, capsys):
+    def test_no_retry_for_60_seconds_after_a_failure(self, monkeypatch):
+        monkeypatch.setattr(p, "_model", None)
+        monkeypatch.setattr(p, "_model_failed_at", None)
         calls = []
-
-        def failing(name):
-            calls.append(name)
-            raise OSError('offline')
-        monkeypatch.setattr(proc, '_load_model', failing)
-        with pytest.raises(OSError):
-            proc.get_model('some/model')
-        with pytest.raises(RuntimeError):
-            proc.get_model()
+        monkeypatch.setattr(p, "_load_model", lambda name: calls.append(name) or (_ for _ in ()).throw(OSError("offline")))
+        for _ in range(3):
+            with pytest.raises(Exception):
+                p.get_model("some/model")
         assert len(calls) == 1
-        assert 'could not be loaded' in capsys.readouterr().err
-        monkeypatch.setattr(proc, '_model_failed_at', proc._model_failed_at - 61)
-        with pytest.raises(OSError):
-            proc.get_model()
-        assert calls == ['some/model', 'some/model']
 
     def test_env_var_has_no_effect(self, monkeypatch):
-        names = []
-        monkeypatch.setenv('N3MC_EMBED_MODEL', 'bogus/model')
-        monkeypatch.setattr(proc, '_load_model', lambda name: names.append(name) or object())
-        proc.get_model()
-        assert names == [proc.DEFAULT_EMBED_MODEL]
+        monkeypatch.setenv("N3MC_EMBED_MODEL", "other/model")
+        assert n3m.get_config()["embed_model"] == "intfloat/multilingual-e5-base"
 
 
-# --------------------------------------------------------------------------- packaging (v1.5.0)
 class TestPackaging:
     def test_psutil_is_a_dependency(self):
-        tomllib = pytest.importorskip('tomllib')
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, 'pyproject.toml'), 'rb') as f:
-            deps = tomllib.load(f)['project']['dependencies']
-        assert any(d.split('>')[0].split('=')[0].strip().lower() == 'psutil' for d in deps)
+        deps = tomllib.load(open(os.path.join(root, "pyproject.toml"), "rb"))["project"]["dependencies"]
+        assert any(d.startswith("psutil") for d in deps)
 
 
-# =========================================================================== v1.6.0
-DAY = timedelta(days=1)
+class TestWeakMatches:
+    def test_fills_up_to_min_results_in_filter_score_order(self, conn, cfg):
+        add(conn, cfg, "zebra stripes quagga")
+        add(conn, cfg, "zebra mammals africa savanna")
+        add(conn, cfg, "zebra crossing street sign")
+        add(conn, cfg, "unrelated pottery wheel clay")
+        res = search(conn, cfg, "zebra stripes quagga")["results"]
+        normal = [r for r in res if not r["weak"]]
+        weak = [r for r in res if r["weak"]]
+        assert len(normal) == 1 and len(res) == 3 and res.index(weak[0]) > res.index(normal[-1])
+        assert weak == sorted(weak, key=lambda r: r["filter_score"], reverse=True)
+
+    def test_min_results_zero_adds_nothing(self, conn, cfg):
+        add(conn, cfg, "zebra stripes quagga")
+        add(conn, cfg, "zebra mammals africa savanna")
+        res = search(conn, {**cfg, "min_results": 0}, "zebra stripes quagga")["results"]
+        assert all(not r["weak"] for r in res) and len(res) == 1
+
+    def test_limit_smaller_than_min_results(self, conn, cfg):
+        for i in range(4):
+            add(conn, cfg, f"zebra variant text {i} with words")
+        res = search(conn, {**cfg, "search_result_limit": 2}, "zebra variant text 0 with words")["results"]
+        assert len(res) <= 2
+
+    def test_same_content_skipped(self, conn, cfg):
+        add(conn, cfg, "zebra stripes quagga", turn_id="a", ts=ago(2))
+        add(conn, cfg, "zebra stripes quagga", turn_id="b", ts=ago(1))
+        res = search(conn, cfg, "zebra stripes quagga")["results"]
+        assert len([r for r in res if r["content"] == "zebra stripes quagga"]) == 1
+
+    def test_per_turn_cap_applies_to_weak(self, conn, cfg):
+        add(conn, cfg, "zebra stripes quagga", turn_id="T")
+        for i in range(3):
+            add(conn, cfg, f"zebra mammals africa savanna {i}", turn_id="T")
+        res = search(conn, cfg, "zebra stripes quagga")["results"]
+        assert len([r for r in res if r["turn_id"] == "T"]) <= 2
+
+    def test_orthogonal_vectors_not_added(self, conn, cfg):
+        add(conn, cfg, "pottery wheel clay")
+        res = search(conn, cfg, "completely different astronomy words")["results"]
+        assert all(r["filter_score"] >= 1e-6 for r in res)
+
+    def test_weak_do_not_feed_pairs(self, conn, cfg):
+        add(conn, cfg, "[user] pottery wheel clay", turn_id="W")
+        res = search(conn, cfg, "pottery")
+        assert "W" not in res["pairs"] or not any(r["weak"] and r["turn_id"] == "W" for r in res["results"])
+
+    def test_empty_query_returns_nothing(self, conn, cfg):
+        add(conn, cfg, "something")
+        assert search(conn, cfg, "")["results"] == []
 
 
-def days_ago(n: float) -> str:
-    return (datetime.now(timezone.utc) - n * DAY).isoformat()
+class TestPidFileRemoval:
+    def test_own_pid_file_is_deleted_and_a_foreign_one_is_kept(self):
+        open(n3m.PID_FILE, "w").write(str(os.getpid()))
+        n3m._remove_own_pid_file()
+        assert not os.path.exists(n3m.PID_FILE)  # (an open handle would make this fail on Windows)
+        open(n3m.PID_FILE, "w").write("999999")
+        n3m._remove_own_pid_file()
+        assert os.path.exists(n3m.PID_FILE)
+
+    def test_exit_server_removes_the_pid_file(self, monkeypatch):
+        open(n3m.PID_FILE, "w").write(str(os.getpid()))
+        monkeypatch.setattr(n3m._os, "_exit", lambda code: None)
+        n3m._exit_server()
+        assert not os.path.exists(n3m.PID_FILE)
 
 
-class TestSearchShaping(TestSearchShaping):  # v1.6.0 additions (A1)
-    def test_old_record_returned_alone(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        add(path, 'ancient fact', emb=at_cos(0.95), ts=days_ago(400))
-        out = proc.hybrid_search(path, 'zzz', cfg(min_score=0.2))
-        assert [r['content'] for r in out['results']] == ['ancient fact']
-        r = out['results'][0]
-        assert r['filter_score'] == pytest.approx(0.95 * 0.7)   # no time_decay
-        assert r['score'] < 0.2 <= r['filter_score']
-
-    def test_new_and_old_both_returned_new_first(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        add(path, 'old version', emb=at_cos(0.92), ts=days_ago(400))
-        add(path, 'new version', emb=at_cos(0.92, axis=2), ts=days_ago(1))
-        out = proc.hybrid_search(path, 'zzz', cfg(min_score=0.2))
-        assert [r['content'] for r in out['results']] == ['new version', 'old version']
+def _vec_at(cos, axis=1):
+    """A unit vector whose cosine with e0 is `cos` (the rest goes on another axis)."""
+    v = [0.0] * 768
+    v[0] = cos
+    v[axis] = (1 - cos * cos) ** 0.5
+    return v
 
 
-class TestWeakMatches:  # v1.6.0 (A2)
-    def _db(self, tmp_path):
-        path = new_db(tmp_path)
-        add(path, 'strong', emb=at_cos(0.95))
-        add(path, 'weak a', emb=at_cos(0.80, axis=2))
-        add(path, 'weak b', emb=at_cos(0.70, axis=3))
-        add(path, 'weak c', emb=at_cos(0.60, axis=4))
-        return path
-
-    def test_fill_to_min_results(self, tmp_path, query_vec):
-        out = proc.hybrid_search(self._db(tmp_path), 'zzz', cfg(min_results=3))
-        res = out['results']
-        assert [r['content'] for r in res] == ['strong', 'weak a', 'weak b']
-        assert [r['weak'] for r in res] == [False, True, True]
-        # a candidate below vector_min_cos keeps its actual cos
-        assert res[1]['filter_score'] == pytest.approx(0.80 * 0.7)
-
-    def test_zero_disables(self, tmp_path, query_vec):
-        out = proc.hybrid_search(self._db(tmp_path), 'zzz', cfg(min_results=0))
-        assert [r['content'] for r in out['results']] == ['strong']
-
-    def test_nothing_added_when_enough(self, tmp_path, query_vec):
-        path = self._db(tmp_path)
-        add(path, 'strong 2', emb=at_cos(0.94, axis=5))
-        add(path, 'strong 3', emb=at_cos(0.93, axis=6))
-        out = proc.hybrid_search(path, 'zzz', cfg(min_results=3))
-        assert not any(r['weak'] for r in out['results'])
-        assert len(out['results']) == 3
-
-    def test_result_limit_caps_total(self, tmp_path, query_vec):
-        out = proc.hybrid_search(self._db(tmp_path), 'zzz',
-                                 cfg(min_results=3, search_result_limit=2))
-        assert [r['content'] for r in out['results']] == ['strong', 'weak a']
-
-    def test_min_score_and_relative_cut_rows_are_candidates(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        add(path, 'top', emb=at_cos(0.99))
-        add(path, 'cut by relative', emb=at_cos(0.40, axis=2))
-        out = proc.hybrid_search(path, 'zzz',
-                                 cfg(vector_min_cos=0.0, min_results=2))
-        assert [(r['content'], r['weak']) for r in out['results']] == \
-            [('top', False), ('cut by relative', True)]
-
-    def test_identical_content_and_turn_cap(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        add(path, 'same text', emb=at_cos(0.95))
-        add(path, 'same text', emb=at_cos(0.80, axis=2))          # identical content
-        add(path, 't1 row a', emb=at_cos(0.94, axis=3), turn_id='t1')
-        add(path, 't1 row b', emb=at_cos(0.93, axis=4), turn_id='t1')
-        add(path, 't1 row c', emb=at_cos(0.79, axis=5), turn_id='t1')  # turn already has 2
-        add(path, 'other', emb=at_cos(0.50, axis=6))
-        out = proc.hybrid_search(path, 'zzz',
-                                 cfg(min_results=4, relative_min_score_ratio=0.0))
-        assert [r['content'] for r in out['results']] == \
-            ['same text', 't1 row a', 't1 row b', 'other']
-        assert out['results'][-1]['weak'] is True
-
-    def test_zero_filter_score_never_added(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        add(path, 'strong', emb=at_cos(0.95))
-        add(path, 'orthogonal', emb=unit(7))                       # cos 0
-        out = proc.hybrid_search(path, 'zzz', cfg(min_results=3))
-        assert [r['content'] for r in out['results']] == ['strong']
-
-    def test_weak_not_used_for_pairs(self, tmp_path, query_vec):
-        path = new_db(tmp_path)
-        add(path, '[user] strong q', emb=at_cos(0.95), turn_id='ts')
-        add(path, '[user] weak q', emb=at_cos(0.80, axis=2), turn_id='tw')
-        add(path, '[claude] weak a', emb=unit(9), turn_id='tw')
-        out = proc.hybrid_search(path, 'zzz', cfg(min_results=3))
-        assert any(r['weak'] and r['turn_id'] == 'tw' for r in out['results'])
-        assert 'tw' not in out['pairs'] and 'tw' not in out['pairs_omitted']
-        assert 'ts' in out['pairs']
-
-    def test_empty_query_no_weak(self, tmp_path, query_vec):
-        out = proc.hybrid_search(self._db(tmp_path), '   ', cfg(min_results=3))
-        assert out['results'] == []
-
-    def test_weak_flag_in_api_response(self, tmp_path, query_vec):
-        # /search returns hybrid_search's dict as is: the key survives JSON
-        out = proc.hybrid_search(self._db(tmp_path), 'zzz', cfg(min_results=3))
-        js = json.loads(json.dumps(out))
-        assert [r['weak'] for r in js['results']] == [False, True, True]
-
-    def test_default_config_does_not_force_weak_results(self):
-        assert n3memory._DEFAULT_CONFIG['min_results'] == 0
+def _e0(_text):
+    v = [0.0] * 768
+    v[0] = 1.0
+    return v
 
 
-class TestRender(TestRender):  # v1.6.0 additions
-    @staticmethod
-    def _row(content, weak, tid=None):
-        return {'id': content, 'content': content, 'score': 0.5, 'weak': weak,
-                'timestamp': '2026-01-01T00:00:00+00:00', 'agent_name': 'claude-code',
-                'turn_id': tid}
-
-    def test_weak_section_between_top_and_pairs(self):
-        md = proc.render_memory_context(
-            {'results': [self._row('top one', False, 't'), self._row('weak one', True)],
-             'pairs': {'t': [{'id': 'x', 'content': '[user] q', 'timestamp': None}]},
-             'pairs_omitted': {}}, 'q')
-        top = md.index('## Top matches')
-        weak = md.index(proc.WEAK_HEADING)
-        qa = md.index('## Previous matching Q-A exchanges')
-        assert top < weak < qa
-        assert proc.WEAK_HEADING == '## Possibly related (weak matches — may be unrelated)'
-        assert md.index('## [2] score=') > weak
-        assert md.index('weak one') > weak
-
-    def test_no_top_matches_but_weak(self):
-        md = proc.render_memory_context(
-            {'results': [self._row('weak one', True)], 'pairs': {}, 'pairs_omitted': {}}, 'q')
-        assert '## Top matches' not in md and 'newest `saved`' not in md
-        assert md.index('_No relevant memories found._') < md.index(proc.WEAK_HEADING)
-        assert '## [1] score=' in md
-
-    def test_no_weak_heading_without_weak_rows(self):
-        md = proc.render_memory_context(
-            {'results': [self._row('top one', False)], 'pairs': {}, 'pairs_omitted': {}}, 'q')
-        assert proc.WEAK_HEADING not in md
-
-
-class TestConfig(TestConfig):  # v1.6.0 additions
-    @pytest.mark.parametrize('value', ['-1', '1.5'])
-    def test_min_results_out_of_range_ignored(self, value):
-        write_cfg('{' + IDS + f', "min_results": {value}' + '}')
-        c = n3memory._load_config()
-        assert c['min_results'] == 0
-        assert 'min_results' in notices()['config_type']['message']
-
-    def test_min_results_zero_accepted(self):
-        write_cfg('{' + IDS + ', "min_results": 0}')
-        c = n3memory._load_config()
-        assert c['min_results'] == 0
-        assert 'config_type' not in notices()
-
-    def test_search_result_limit_over_1365_ignored(self):
-        """C-06 (spec §3.5): k = 3 x limit must stay within sqlite-vec's 4096."""
-        write_cfg('{' + IDS + ', "search_result_limit": 1366}')
-        c = n3memory._load_config()
-        assert c['search_result_limit'] == 20
-        assert 'search_result_limit' in notices()['config_type']['message']
-
-    def test_search_result_limit_1365_accepted_and_k_works(self, tmp_path):
-        write_cfg('{' + IDS + ', "search_result_limit": 1365}')
-        c = n3memory._load_config()
-        assert c['search_result_limit'] == 1365
-        assert 'config_type' not in notices()
-        conn = db.get_connection(str(tmp_path / 'k.db'))
-        try:
-            db.init_db(conn)
-            vec = db.serialize_vector([0.0] * 768)
-            sql = 'SELECT rowid FROM memories_vec WHERE embedding MATCH ? AND k = ?'
-            conn.execute(sql, (vec, 3 * c['search_result_limit'])).fetchall()
-            with pytest.raises(sqlite3.OperationalError):
-                conn.execute(sql, (vec, 3 * 1366)).fetchall()
-        finally:
-            conn.close()
-
-# --------------------------------------------------------------------------- proxy (final review 2026-11-18, F16)
-class TestNoProxyToOwnServer:
-    """HTTP_PROXY must not send the CLI's and the hooks' requests to a proxy (spec §3 Communication)."""
-
-    def test_http_proxy_is_ignored(self, monkeypatch):
-        import http.server
-        import threading
-        hits = {'server': 0, 'proxy': 0}
-
-        def handler(name):
-            class H(http.server.BaseHTTPRequestHandler):
-                def do_GET(self):
-                    hits[name] += 1
-                    body = b'{"status": "ok"}'
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'application/json')
-                    self.send_header('Content-Length', str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-
-                def log_message(self, *a):
-                    pass
-            return H
-        servers = [http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler(n)) for n in ('server', 'proxy')]
-        for s in servers:
-            threading.Thread(target=s.serve_forever, daemon=True).start()
-        try:
-            port, proxy_port = servers[0].server_address[1], servers[1].server_address[1]
-            for var in ('HTTP_PROXY', 'http_proxy'):
-                monkeypatch.setenv(var, f'http://127.0.0.1:{proxy_port}')
-            for var in ('NO_PROXY', 'no_proxy'):
-                monkeypatch.delenv(var, raising=False)
-            assert REAL_GET({'server_port': port}, '/health') == {'status': 'ok'}
-            assert hits == {'server': 1, 'proxy': 0}
-        finally:
-            for s in servers:
-                s.shutdown()
-                s.server_close()
-
-
-# --------------------------------------------------------------------------- /repair and the write lock (final review 2026-11-18, F11)
-class TestRepairKeepsWritesOpen:
-    """spec §3.5: /repair embeds a batch before it writes, so a save is not locked out meanwhile."""
-
-    def test_write_while_repair_embeds(self, tmp_path, monkeypatch):
-        import threading
-        path = new_db(tmp_path, 'lock.db')
-        monkeypatch.setattr(n3memory, 'DB_PATH', path)
-        monkeypatch.setattr(n3memory, '_srv_cfg', {'owner_id': 'o', 'local_id': 'l', 'server_port': 18998})
-        conn = db.get_connection(path)
-        for i in range(10):
-            db.insert_memory(conn, f'id-{i}', f'record number {i}', '2026-11-18T00:00:00+00:00', 'o')
-        conn.commit()
-        conn.close()
-        started = threading.Event()
-
-        def slow_embed(text):
-            started.set()
-            time.sleep(0.2)
-            return fake_embed(text)
-        monkeypatch.setattr(proc, 'embed_passage', slow_embed)
-        t = threading.Thread(target=n3memory._repair_db)
-        t.start()
-        assert started.wait(5)
-        time.sleep(0.5)                      # /repair is embedding the batch (10 x 0.2 s)
-        other = sqlite3.connect(path, timeout=0.5)
-        try:
-            other.execute('BEGIN IMMEDIATE')  # what /buffer does (insert_memory_once)
-            other.execute('COMMIT')
-        finally:
-            other.close()
-        t.join(30)
-        assert not t.is_alive()
-        check = db.get_connection(path)
-        try:
-            assert check.execute('SELECT COUNT(*) FROM memories_vec').fetchone()[0] == 10
-        finally:
-            check.close()
-
-    def test_busy_timeout_is_explicit(self, tmp_path):
-        assert db.BUSY_TIMEOUT_SECONDS == 10
-
-
-# --------------------------------------------------------------------------- lone surrogates (final review 2026-11-18, F12)
-
-
-# --------------------------------------------------------------------------- DB corruption that raises (final review 2026-11-18, F13)
-class TestDbCorruptRaises:
-    """spec §3.5: a damaged file that makes SQLite raise is set aside like one that fails the check."""
-
-    def _corrupt(self, how):
-        path = n3memory.DB_PATH
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        if how == 'garbage':
-            with open(path, 'wb') as f:
-                f.write(b'this is not a database ' * 300)
-            return
-        c = db.get_connection(path)
-        db.init_db(c)
-        for i in range(50):
-            db.insert_memory(c, f'i{i}', 'x' * 500, '2026-11-18T00:00:00+00:00', 'o')
-        c.commit()
-        c.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        c.close()
-        with open(path, 'r+b') as f:            # the first page, after the 100-byte header
-            f.seek(100)
-            f.write(b'\xff' * 3900)
-
-    @pytest.mark.parametrize('how', ['garbage', 'first_page'])
-    def test_direct_save_sets_it_aside(self, how):
-        import glob
-        self._corrupt(how)
-        n3memory._buffer_direct('saved after the corruption', {'owner_id': 'o'})
-        assert len(glob.glob(n3memory.DB_PATH + '.corrupt-*.bak')) == 1
-        assert count(n3memory.DB_PATH) == 1
-        assert 'db_corrupt' in notices()
-
-    def test_startup_check_sets_it_aside(self):
-        import glob
-        self._corrupt('garbage')
-        conn = n3memory._connect_checked('integrity_check')
-        conn.close()
-        assert len(glob.glob(n3memory.DB_PATH + '.corrupt-*.bak')) == 1
-
-    def test_other_errors_are_not_corruption(self):
-        assert not n3memory._is_corruption_error(sqlite3.OperationalError('database is locked'))
-        assert not n3memory._is_corruption_error(sqlite3.DatabaseError('Failed to load sqlite-vec extension: x'))
-        assert n3memory._is_corruption_error(sqlite3.DatabaseError('file is not a database'))
-        assert n3memory._is_corruption_error(sqlite3.DatabaseError('database disk image is malformed'))
+def _add_vec(conn, cfg, content, cos, axis=1, turn_id=None):
+    rid = n3m._new_id()
+    db.insert_memory(conn, rid, content, NOW.isoformat(), cfg["owner_id"], cfg["local_id"], "claude-code",
+                     None, turn_id=turn_id, embedding=_vec_at(cos, axis))
+    return rid

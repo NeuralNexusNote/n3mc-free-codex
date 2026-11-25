@@ -1,63 +1,37 @@
-"""Second review of 2026-11-17, R04: two saves of the same text for the same turn at once (spec §5.4)."""
-import contextlib
+"""R04: saving the same text in the same turn twice at once stores it once (no model)."""
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
 
-import pytest
-
-from n3memorycore import n3memory as N
-from n3memorycore.core import database as D
-from n3memorycore.core import processor as P
+from n3memorycore_free_codex import n3memory as n3m
+from n3memorycore_free_codex.core import database as db
 
 
-def _run_two(tmp_path, turns):
-    db = str(tmp_path / "race.db")
-    c = D.get_connection(db)
-    D.init_db(c)
-    D.migrate_schema(c)
-    c.close()
-    barrier = threading.Barrier(2)
-
-    def embed(_text):
-        barrier.wait(timeout=10)          # both requests passed the first check before either writes
-        return [1.0] + [0.0] * 767
-
-    with contextlib.ExitStack() as st:
-        st.enter_context(patch.object(N, "DB_PATH", db))
-        st.enter_context(patch.object(N, "_srv_cfg", {"owner_id": "owner", "local_id": "local"}))
-        st.enter_context(patch.object(N, "_srv_session", "session"))
-        st.enter_context(patch.object(P, "embed_passage", embed))
-        if hasattr(N, "embed_passage"):
-            st.enter_context(patch.object(N, "embed_passage", embed))
-        if hasattr(N, "_entity_enqueue"):
-            st.enter_context(patch.object(N, "_entity_enqueue", lambda *a: None))
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            futs = [ex.submit(N.ep_buffer, N.BufferRequest(content="same text", turn_id=t)) for t in turns]
-            results = [f.result(timeout=30) for f in futs]
-    c = D.get_connection(db)
-    rows = c.execute("SELECT turn_id FROM memories").fetchall()
-    c.close()
-    return results, rows
+def _save(cfg, content, turn_id, results, barrier):
+    conn = db.get_connection()
+    try:
+        barrier.wait()
+        results.append(n3m._store_record(conn, cfg, content, "claude-code", None, "s", turn_id, embed=False))
+    finally:
+        conn.close()
 
 
 class TestDedupConcurrent:
-    def test_concurrent_same_turn_saved_once(self, tmp_path):
-        results, rows = _run_two(tmp_path, ["same-turn", "same-turn"])
-        assert len(rows) == 1
-        assert sorted(r.get("reason", r["status"]) for r in results) == ["exact_duplicate", "ok"]
+    def test_concurrent_same_turn_saved_once(self, conn, cfg):
+        results, barrier = [], threading.Barrier(2)
+        ts = [threading.Thread(target=_save, args=(cfg, "[user] same", "T", results, barrier)) for _ in range(2)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        assert db.count_memories(conn) == 1
+        assert sorted(r["status"] for r in results) == ["ok", "skipped"]
+        assert [r.get("reason") for r in results if r["status"] == "skipped"] == ["exact_duplicate"]
 
-    def test_same_text_other_turn_still_saved(self, tmp_path):
-        results, rows = _run_two(tmp_path, ["turn-a", "turn-b"])
-        assert len(rows) == 2 and all(r["status"] == "ok" for r in results)
+    def test_same_text_other_turn_still_saved(self, conn, cfg):
+        n3m._store_record(conn, cfg, "[user] same", turn_id="A", embed=False)
+        n3m._store_record(conn, cfg, "[user] same", turn_id="B", embed=False)
+        assert db.count_memories(conn) == 2
 
-    def test_insert_memory_once_returns_none_for_a_duplicate(self, tmp_path):
-        db = str(tmp_path / "once.db")
-        c = D.get_connection(db)
-        D.init_db(c)
-        D.migrate_schema(c)
-        assert D.insert_memory_once(c, "id-1", "text", "2026-11-17T00:00:00+00:00", "o", turn_id="t") is not None
-        assert D.insert_memory_once(c, "id-2", "text", "2026-11-17T00:00:00+00:00", "o", turn_id="t") is None
-        assert not c.in_transaction
-        assert c.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
-        c.close()
+    def test_insert_memory_once_returns_none_for_a_duplicate(self, conn, cfg):
+        a = db.insert_memory_once(conn, "i1", "txt", "2026-01-01T00:00:00+00:00", cfg["owner_id"], turn_id="T")
+        b = db.insert_memory_once(conn, "i2", "txt", "2026-01-01T00:00:00+00:00", cfg["owner_id"], turn_id="T")
+        assert a is not None and b is None
+        assert not conn.in_transaction
+        assert db.count_memories(conn) == 1

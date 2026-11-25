@@ -1,240 +1,143 @@
-"""Layer 3: FastAPI endpoint tests via TestClient (spec §7)."""
-import math
-import uuid
+"""Layer 3: FastAPI endpoints through TestClient (fake embeddings: the model is not needed here)."""
 import pytest
-
 from fastapi.testclient import TestClient
 
+from n3memorycore_free_codex import n3memory as n3m
 
-@pytest.fixture(scope='module')
-def client(tmp_path_factory):
-    """Isolated FastAPI app with a temp DB."""
-    import os
-    from n3memorycore import n3memory
-
-    tmp = tmp_path_factory.mktemp('api_db')
-    db_path = str(tmp / 'test.db')
-
-    # Patch module-level globals so the app uses our temp DB/config
-    original_db   = n3memory.DB_PATH
-    original_cfg  = n3memory._srv_cfg
-    original_sess = n3memory._srv_session
-
-    cfg = {
-        'owner_id':               str(uuid.uuid4()),
-        'local_id':               str(uuid.uuid4()),
-        'server_port':            18521,
-        'half_life_days':         90,
-        'bm25_min_threshold':     0.1,
-        'search_result_limit':    20,
-        'min_score':              0.0,
-        'search_query_max_chars': 2000,
-        'embed_model':            'intfloat/multilingual-e5-base',
-    }
-
-    n3memory.DB_PATH      = db_path
-    n3memory._srv_cfg     = cfg
-    n3memory._srv_session = str(uuid.uuid4())
-
-    from n3memorycore.core.database import get_connection, init_db
-    conn = get_connection(db_path)
-    init_db(conn)
-    conn.close()
-
-    # Ensure model is loaded
-    from n3memorycore.core.processor import get_model
-    get_model(cfg.get('embed_model'))
-
-    tc = TestClient(n3memory.app, raise_server_exceptions=True)
-    tc.n3mc_db_path = db_path
-    yield tc
-
-    n3memory.DB_PATH      = original_db
-    n3memory._srv_cfg     = original_cfg
-    n3memory._srv_session = original_sess
+PORT = 18526
 
 
-@pytest.fixture(autouse=True)
-def _use_module_db(client, monkeypatch):
-    """conftest isolates paths per test; point the app back at this module's DB."""
-    from n3memorycore import n3memory
-    monkeypatch.setattr(n3memory, 'DB_PATH', client.n3mc_db_path)
+@pytest.fixture
+def client(use_fake_embed):
+    return TestClient(n3m.create_app(), base_url=f"http://127.0.0.1:{PORT}")
 
 
-# ---------------------------------------------------------------------------
 class TestHealth:
-
     def test_health_ok(self, client):
-        resp = client.get('/health')
-        assert resp.status_code == 200
-        assert resp.json()['status'] == 'ok'
+        j = client.get("/health").json()
+        assert j["status"] == "ok" and j["root"] == n3m.HOME_DIR and len(j["code_version"]) == 16 and j["pid"]
 
 
-# ---------------------------------------------------------------------------
 class TestBuffer:
-
     def test_save_content(self, client):
-        resp = client.post('/buffer', json={'content': '保存テスト: テキスト内容'})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data['status'] in ('ok', 'skipped')
+        assert client.post("/buffer", json={"content": "[user] hello there"}).json() == {"status": "ok", "count": 1}
 
     def test_empty_content_skipped(self, client):
-        resp = client.post('/buffer', json={'content': ''})
-        assert resp.status_code == 200
-        assert resp.json()['status'] == 'skipped'
+        assert client.post("/buffer", json={"content": "  "}).json()["reason"] == "empty"
 
     def test_agent_name_saved(self, client):
-        resp = client.post('/buffer', json={'content': 'agent test content xyz123', 'agent_name': 'test-agent'})
-        assert resp.status_code == 200
+        client.post("/buffer", json={"content": "a record", "agent_name": "claude-code"})
+        assert client.get("/list").json()["records"][0]["agent_name"] == "claude-code"
 
     def test_exact_dedup(self, client):
-        text = f'dedup-test-{uuid.uuid4()}'
-        r1 = client.post('/buffer', json={'content': text})
-        r2 = client.post('/buffer', json={'content': text})
-        assert r1.json()['status'] == 'ok'
-        assert r2.json()['status'] == 'skipped'
+        client.post("/buffer", json={"content": "dup", "turn_id": "T"})
+        r = client.post("/buffer", json={"content": "dup", "turn_id": "T"}).json()
+        assert r["status"] == "skipped" and r["reason"] == "exact_duplicate"
 
     def test_code_block_purified(self, client):
-        text = 'Some text\n```python\nprint("secret")\n```\nend'
-        resp = client.post('/buffer', json={'content': text})
-        assert resp.status_code == 200
+        client.post("/buffer", json={"content": "before\n```\nx\ny\n```\nafter"})
+        assert client.get("/list").json()["records"][0]["content"] == "before\n[code omitted]\nafter"
 
 
-# ---------------------------------------------------------------------------
 class TestSearch:
-
-    def test_empty_db_search(self, client, tmp_path):
-        import os
-        from n3memorycore import n3memory as nm
-        old_db = nm.DB_PATH
-        fresh_db = str(tmp_path / 'empty.db')
-        from n3memorycore.core.database import get_connection, init_db
-        conn = get_connection(fresh_db)
-        init_db(conn)
-        conn.close()
-        nm.DB_PATH = fresh_db
-        resp = client.post('/search', json={'query': 'anything'})
-        nm.DB_PATH = old_db
-        assert resp.status_code == 200
-        assert 'results' in resp.json()
+    def test_empty_db_search(self, client):
+        assert client.post("/search", json={"query": "anything at all"}).json()["results"] == []
 
     def test_save_then_search(self, client):
-        unique = f'坂本龍馬テスト-{uuid.uuid4()}'
-        client.post('/buffer', json={'content': unique})
-        resp = client.post('/search', json={'query': unique[:10]})
-        assert resp.status_code == 200
-        assert 'results' in resp.json()
+        client.post("/buffer", json={"content": "the zebra crossed the river at dawn"})
+        r = client.post("/search", json={"query": "zebra river dawn"}).json()
+        assert r["results"][0]["content"].startswith("the zebra")
 
     def test_empty_query(self, client):
-        resp = client.post('/search', json={'query': ''})
-        assert resp.status_code == 200
-        assert 'results' in resp.json()
+        assert client.post("/search", json={"query": ""}).json()["results"] == []
 
     def test_score_returned(self, client):
-        unique = f'scoring metric result verification {uuid.uuid4()}'
-        client.post('/buffer', json={'content': unique})
-        resp = client.post('/search', json={'query': unique[:20]})
-        data = resp.json()
-        if data.get('results'):
-            assert 'score' in data['results'][0]
+        client.post("/buffer", json={"content": "the zebra crossed the river at dawn"})
+        r = client.post("/search", json={"query": "zebra river dawn"}).json()["results"][0]
+        assert r["score"] > 0 and r["weak"] is False and "turn_id" in r
+
+    def test_bad_since_is_400(self, client):
+        assert client.post("/search", json={"query": "x", "since": "yesterday"}).status_code == 400
 
 
-# ---------------------------------------------------------------------------
 class TestRepair:
-
     def test_repair_runs(self, client):
-        resp = client.post('/repair', json={})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data['status'] == 'ok'
-        assert 'count' in data
+        assert client.post("/repair", json={}).json()["status"] == "ok"
 
-    def test_count_excludes_unrepaired_records(self, client, monkeypatch):
-        # spec §4 (2026-11-16): a record whose embedding cannot be computed
-        # (and whose FTS row exists) is not counted as repaired.
-        from datetime import datetime, timezone
-        from n3memorycore import n3memory
-        from n3memorycore.core import database, processor
-        client.post('/repair', json={})            # settle earlier records
-        conn = database.get_connection(n3memory.DB_PATH)
-        try:
-            for i in range(3):
-                database.insert_memory(
-                    conn, str(uuid.uuid4()), f'no vector yet {uuid.uuid4()}',
-                    datetime.now(timezone.utc).isoformat(), owner_id='o')
-        finally:
-            conn.close()
+    def test_count_excludes_unrepaired_records(self, client, monkeypatch, conn, cfg):
+        from .conftest import add
+        add(conn, cfg, "needs a vector", embed=False)
+        monkeypatch.setattr(n3m, "embed_passage", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no model")))
+        from n3memorycore_free_codex.core import database as db
+        assert client.post("/repair", json={}).json()["count"] == 0  # FTS rows exist; the vector cannot be made
+        assert len(db.find_unindexed_memories(conn)) == 1
 
-        def _fail(text):
-            raise RuntimeError('model unavailable')
+    def test_repair_adds_the_vector_when_the_model_works(self, client, conn, cfg):
+        from n3memorycore_free_codex.core import database as db
+        from .conftest import add
+        add(conn, cfg, "needs a vector", embed=False)
+        assert client.post("/repair", json={}).json()["count"] == 1
+        assert db.find_unindexed_memories(conn) == []
 
-        with monkeypatch.context() as m:
-            m.setattr(processor, 'embed_passage', _fail)
-            assert client.post('/repair', json={}).json()['count'] == 0
-            assert client.post('/repair', json={'max_records': 200}).json()['count'] == 0
-        assert client.post('/repair', json={}).json()['count'] == 3
+    def test_two_repairs_on_the_same_row_do_not_collide(self, client, conn, cfg, monkeypatch):
+        from n3memorycore_free_codex.core import database as db
+        from .conftest import add, fake_embed
+        add(conn, cfg, "needs a vector", embed=False)
+
+        def embed_then_other_repair(text, name=None):
+            monkeypatch.setattr(n3m, "embed_passage", lambda t, name=None: fake_embed(t))
+            assert client.post("/repair", json={}).json()["status"] == "ok"  # a second repair, mid-embedding
+            return fake_embed(text)
+
+        monkeypatch.setattr(n3m, "embed_passage", embed_then_other_repair)
+        assert client.post("/repair", json={}).json()["status"] == "ok"
+        assert conn.execute("SELECT COUNT(*) FROM memories_vec").fetchone()[0] == 1
+
+    def test_repair_batch_does_not_hold_the_write_lock_while_embedding(self, client, conn, cfg, monkeypatch):
+        import threading
+        import time
+        import sqlite3
+        from .conftest import add, fake_embed
+        add(conn, cfg, "slow one", embed=False)
+        got = {}
+
+        def slow(text, name=None):
+            time.sleep(0.2)
+            return fake_embed(text)
+
+        def probe():
+            time.sleep(0.05)
+            c2 = sqlite3.connect(n3m.DB_PATH, timeout=0.5)
+            t0 = time.time()
+            c2.execute("BEGIN IMMEDIATE")
+            got["wait"] = time.time() - t0
+            c2.rollback()
+            c2.close()
+
+        monkeypatch.setattr(n3m, "embed_passage", slow)
+        th = threading.Thread(target=probe)
+        th.start()
+        client.post("/repair", json={})
+        th.join()
+        assert got["wait"] < 0.5
 
 
-# ---------------------------------------------------------------------------
 class TestList:
-
     def test_list_returns_records(self, client):
-        resp = client.get('/list')
-        assert resp.status_code == 200
-        data = resp.json()
-        assert 'records' in data
-        assert 'total' in data
+        assert client.get("/list").json() == {"records": [], "total": 0}
 
     def test_list_after_save(self, client):
-        unique = f'list endpoint roundtrip check {uuid.uuid4()}'
-        client.post('/buffer', json={'content': unique})
-        resp = client.get('/list')
-        data = resp.json()
-        contents = [r['content'] for r in data['records']]
-        # The saved text may be purified, but should appear
-        assert any(unique[:20] in c for c in contents)
+        client.post("/buffer", json={"content": "one"})
+        assert client.get("/list").json()["total"] == 1
 
 
-# ---------------------------------------------------------------------------
-class TestDelete:
-
+class TestProOnly:
     def test_delete_returns_403(self, client):
-        resp = client.delete('/delete/some-uuid')
-        assert resp.status_code == 403
-
-    def test_delete_nonexistent_also_403(self, client):
-        resp = client.delete('/delete/does-not-exist')
-        assert resp.status_code == 403
-
-    def test_delete_detail_is_pro(self, client):
-        resp = client.delete('/delete/some-uuid')
-        assert 'Pro' in resp.json().get('detail', '')
-
-
-# ---------------------------------------------------------------------------
-class TestGC:
+        r = client.delete("/delete/x")
+        assert r.status_code == 403 and r.json()["detail"] == "Pro feature"
 
     def test_gc_returns_403(self, client):
-        resp = client.post('/gc', json={})
-        assert resp.status_code == 403
-
-    def test_gc_detail_is_pro(self, client):
-        resp = client.post('/gc', json={})
-        assert 'Pro' in resp.json().get('detail', '')
-
-
-# ---------------------------------------------------------------------------
-class TestImport:
+        assert client.post("/gc").status_code == 403
 
     def test_import_returns_403(self, client):
-        resp = client.post('/import', json=[])
-        assert resp.status_code == 403
-
-    def test_import_with_data_returns_403(self, client):
-        resp = client.post('/import', json={'records': []})
-        assert resp.status_code == 403
-
-    def test_import_detail_is_pro(self, client):
-        resp = client.post('/import', json={})
-        assert 'Pro' in resp.json().get('detail', '')
+        assert client.post("/import", json={"records": []}).status_code == 403
