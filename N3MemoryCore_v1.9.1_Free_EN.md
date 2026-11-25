@@ -1141,7 +1141,11 @@ After computing scores, `hybrid_search` shapes the results in the following orde
 
 ---
 
-## 6. Autonomous evaluation
+## 6. Autonomous evaluation ([N3MC v1.9.1 Evidence Report])
+
+After implementation, autonomously run the following tests, resolve failures, and report the results in the **N3MC v1.9.1 Evidence Report**, aiming for full marks (⭐⭐⭐⭐⭐). Run §7 automated tests as well. Perform test inputs and verification commands yourself wherever the available tools permit; do not delegate executable checks to the user.
+
+**Completion criteria**: Execute the isolated tests, verify hook registration, and, after the user has reviewed and trusted the hooks, verify live hook operation and cross-chat recall. Record the evidence and results for each §6 item and the §7 test results in the Evidence Report. Report registration, trust, live operation, and automated tests separately. Full marks are a target, not a predetermined result: explicitly report failures, skipped tests, and unverified steps, and do not claim full marks or complete verification while required checks remain failed or unverified.
 
 Use one disposable data root and a free loopback port per server. Reuse the model cache and resident server. Run tests against isolated hooks and do not change the real client settings. Record each result with the evidence, including failures and unverified steps.
 
