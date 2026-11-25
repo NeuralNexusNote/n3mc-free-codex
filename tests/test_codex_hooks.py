@@ -219,10 +219,10 @@ def test_recall_neighbours_are_from_same_session(conn, cfg, capsys):
         add(conn, cfg, turn, turn_id=turn, session_id=session, embed=False)
     assert memory.cmd_recall_thread("anchor", before=1, after=1, fmt="jsonl") == 0
     lines = capsys.readouterr().out.splitlines()
-    assert [json.loads(line)["turn_id"] for line in lines[:-1]] == ["prior", "anchor", "after"]
+    assert [json.loads(line)["turn_id"] for line in lines] == ["prior", "anchor", "after"]
     assert memory.cmd_recall_thread("alone", fmt="jsonl") == 0
     lines = capsys.readouterr().out.splitlines()
-    assert [json.loads(line)["turn_id"] for line in lines[:-1]] == ["alone"]
+    assert [json.loads(line)["turn_id"] for line in lines] == ["alone"]
 
 
 def test_fts_rules_replace_old_index_and_resume(conn, cfg):
@@ -230,6 +230,9 @@ def test_fts_rules_replace_old_index_and_resume(conn, cfg):
     add(conn, cfg, "[claude] talks about [code omitted]", embed=True)
     conn.execute("UPDATE memories_fts SET content=(SELECT content FROM memories WHERE rowid=memories_fts.rowid)")
     conn.commit()
+    memory._repair(conn, cfg, max_records=1)
+    assert db.get_meta(conn, "fts_text_cursor") is None  # punctuation migration consumed the budget
+    memory._repair(conn, cfg, max_records=1)
     memory._repair(conn, cfg, max_records=1)
     assert db.get_meta(conn, "fts_text_cursor") == "1"
     memory._repair(conn, cfg)
@@ -370,3 +373,49 @@ def test_connected_manual_buffer_uses_verified_target(outcome, tmp_path, monkeyp
     assert not Path(memory.DB_PATH).exists()
     assert memory.cmd_repair() == memory.cmd_reembed() == 1
     assert requests == (["/buffer"] if outcome in ("ok", "error") else [])
+
+@pytest.mark.parametrize("fields", [
+    {"prompt": '{"password": "SyntheticValue123"}'},
+    {"metadata": {"access_token": "SyntheticValue123"}},
+    {"prompt": "api_key=`SyntheticValue123`"},
+])
+def test_structured_credentials_exclude_whole_turn(conn, fields, monkeypatch):
+    monkeypatch.setattr(memory, "_search_text", lambda *a, **kw: pytest.fail("excluded prompt searched"))
+    assert "excluded" in hook(PROMPT, fields.get("prompt", "hello"),
+                              **{k: v for k, v in fields.items() if k != "prompt"})["systemMessage"]
+    assert "excluded" in hook(STOP, "ordinary reply")["systemMessage"]
+    assert not Path(memory.AUDIT_LOG).exists() and db.count_memories(conn) == 0
+
+
+def test_repair_missing_bigram_after_migration(conn, cfg):
+    add(conn, cfg, "盛岡", embed=True)
+    memory._repair(conn, cfg)
+    conn.execute("DELETE FROM memories_fts_bi")
+    conn.commit()
+    assert not db.search_fts_bigram(conn, "盛岡")
+    assert memory._repair(conn, cfg, max_records=1) == 1
+    assert db.search_fts_bigram(conn, "盛岡")
+
+
+def test_bigram_backfill_respects_limit(conn, cfg):
+    for name in ("盛岡", "花巻", "遠野"):
+        add(conn, cfg, name, embed=True)
+    memory._repair(conn, cfg)
+    conn.execute("DELETE FROM memories_fts_bi")
+    db.delete_meta(conn, "fts_bigram")
+    conn.commit()
+    memory._repair(conn, cfg, max_records=1)
+    assert conn.execute("SELECT COUNT(*) FROM memories_fts_bi").fetchone()[0] == 1
+    assert db.get_meta(conn, "fts_bigram") is None
+    memory._repair(conn, cfg)
+    assert db.get_meta(conn, "fts_bigram") == "1"
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_thread_jsonl_has_only_records(conn, cfg, capsys, present):
+    if present:
+        add(conn, cfg, "記録", turn_id="target", embed=False)
+    memory.main(["--recall-thread", "target", "--format", "jsonl"])
+    output = capsys.readouterr()
+    assert [json.loads(line)["content"] for line in output.out.splitlines()] == (["記録"] if present else [])
+    assert f"Total: {int(present)} records" in output.err

@@ -805,13 +805,15 @@ At server startup (`lifespan`), run the full `PRAGMA integrity_check` exactly on
 
 ### Migration Batch Processing
 
-Bulk migrations inside `/repair` (vector re-indexing, FTS punctuation cleaning) execute in **batches of 200**. To prevent OOM on large DBs, fetch using `LIMIT 200` instead of `fetchall()`. **Always keep `OFFSET` at `0`** — repaired records automatically drop out of the `WHERE mv.rowid IS NULL OR mf.rowid IS NULL` result set, so incrementing `OFFSET` across batches would skip the remaining unrepaired records (e.g., 400 unrepaired → 200 repaired → `OFFSET 200` returns 0 rows → remaining 200 permanently skipped). Exit immediately if a batch produces zero progress (e.g., embedding model unavailable) to prevent infinite loops.
+Bulk migrations inside `/repair` (vector re-indexing, FTS punctuation cleaning) execute in **batches of 200**. To prevent OOM on large DBs, fetch using `LIMIT 200` instead of `fetchall()`. **Always keep `OFFSET` at `0`** — repaired records automatically drop out of the `WHERE mv.rowid IS NULL OR mf.rowid IS NULL OR mb.rowid IS NULL` result set, so incrementing `OFFSET` across batches would skip the remaining unrepaired records (e.g., 400 unrepaired → 200 repaired → `OFFSET 200` returns 0 rows → remaining 200 permanently skipped). Exit immediately if a batch produces zero progress (e.g., embedding model unavailable) to prevent infinite loops.
 
 **No write lock while embedding**: the vector repair computes the embeddings of the whole batch first, outside any transaction (an open one is committed before), and only then inserts the batch's `memories_vec` / `memories_fts` / `memories_fts_bi` rows and commits — the same order as `--reembed`. (If the first `INSERT … memories_vec` opened the write transaction while the rest of the batch — up to 200 records — was still being embedded, a `/buffer` that arrived meanwhile would wait for the busy timeout and fail with `database is locked`, and so would its `_buffer_direct` fallback, so the prompt would not be saved.) **Check again before writing**: after the embeddings, take the write lock with `BEGIN IMMEDIATE`, and for each row of the batch check that the `memories` row still exists and is the same record (both ID and content match) and that `memories_fts` / `memories_fts_bi` / `memories_vec` still have no row for that rowid; write only what is missing. Rows another call (a hook in another window, a manual `--repair`) has filled meanwhile, and rows deleted meanwhile, are skipped. (Without this check, when two calls read the same unrepaired row, the later one would stop with `UNIQUE constraint failed on memories_vec primary key`.)
 
 **Per-call limit for hooks**: `/repair` accepts an optional body `{"max_records": int}`. `--hook-submit` sends `{"max_records": 20}`, so a large backlog — e.g. many records saved through `_buffer_direct` while another folder's server held the port — is worked off a batch per turn instead of blocking one prompt for minutes. `n3mc-free-codex --repair` sends no limit and processes everything. The one-time migrations (FTS punctuation cleaning, vector re-index) follow the same limit; their markers are written only when the migration has finished.
 
 The **FTS punctuation cleaning** is the exception: processed rows do not drop out of its result set (they are only UPDATEd), so `OFFSET 0` would never finish. Page it with a keyset instead: `WHERE rowid > <last rowid of the previous batch> ORDER BY rowid LIMIT 200`. **Carry on where the last call stopped**: write the last rowid done to the `meta` key `fts_punct_cursor` in the same transaction as each batch's rewrites; the next call starts after it, not at rowid 0 (so calls with `max_records` keep moving on, also across restarts). When the last row has been read, write `fts_punct_cleaned` and delete `fts_punct_cursor`. (Without the cursor, every call with a limit would start again at rowid 0, never reach row 201, and never write the marker.)
+
+Select records missing any of the vector, trigram, or bigram indexes, even after migration completes. Share max_records across punctuation cleanup, bigram backfill, text index rebuild, and missing-index repair. Resume on the next call when the budget runs out. Test an isolated bigram loss after migration and a legacy database with a one-record limit.
 
 ### Index metadata (`meta` table) and `--reembed`
 
@@ -884,6 +886,8 @@ python -m n3memorycore_free_codex.n3memory --recall-thread <turn_id> [--before N
 - **Operational rule**: When the snippet returned by `--search` is insufficient, Codex SHOULD pass the hit's `turn_id` to `--recall-thread` to retrieve surrounding context. End users do not need to invoke this command directly.
 
 ---
+
+For thread recall in JSONL format, write the total to stderr. Check that every stdout line parses as JSON and that zero records produce empty stdout, including absent databases and legacy schemas.
 
 ## 3.7. Backward Compatibility (Mandatory)
 
@@ -1035,6 +1039,8 @@ An eligible nonblank message is preserved without a minimum length or routine-re
 Apply the Free Codex no-save and secret filters before logging, searching or buffering. Recognize explicit no-save requests in Japanese or English, including この会話の保存はやめてください and “Please don’t save this reply” with a typographic apostrophe and credential patterns such as private-key blocks, service tokens, bearer tokens, or assignments of secret-like values. Ordinary implementation questions are not no-save requests: do not exclude “この関数は結果を保存しないで返すように直して” or “Why does the hook never save the reply when the server is down?”. Environment-variable references, explicit dummy values such as `xxxxxx`, and explanatory prose such as `API key: 環境変数から読みます` are not credential values. A matching prompt creates only the empty marker `.memory/skip_<sha256(session_id + NUL + turn_id)>` and suppresses its reply. A reply with a detected credential is excluded; an already saved prompt remains. Validate and sanitize before persisting; report exclusions using `systemMessage` and stderr without recording raw text. Do not depend on successful-hook stderr being visible.
 
 Include the stored turn_id in each strong or weak result heading when present. This lets the reader open a local turn even when supplementary exchanges are omitted.
+
+Check quoted JSON keys in message text, backtick-delimited assignment values, and key/string-value pairs inside nested event objects. Use synthetic credentials in each form to verify that an excluded prompt and its reply never reach audit, search, or storage.
 
 ### 5.2 Hook flow and auditing
 

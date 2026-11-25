@@ -647,7 +647,9 @@ def _store_record(conn, cfg, content, agent_name=None, local_id=None, session_id
 def _repair(conn, cfg, max_records=None):
     """Repair un-indexed records and run one-time migrations. Returns the number of records changed."""
     changed = 0
-    budget = max_records if max_records else None
+    budget = max_records
+    if budget is not None and budget <= 0:
+        return 0
     # --- meta: model of the stored vectors
     if get_meta(conn, "embed_model") is None:
         model = cfg["embed_model"]
@@ -702,31 +704,35 @@ def _repair(conn, cfg, max_records=None):
             set_meta(conn, "fts_punct_cleaned", "1")
             delete_meta(conn, "fts_punct_cursor")
             conn.commit()
+    if budget is not None:
+        budget -= processed
     # --- one-time bigram index fill
     if get_meta(conn, "fts_bigram") is None:
-        while True:
+        while budget is None or budget > 0:
+            limit = 200 if budget is None else min(200, budget)
             rows = conn.execute(
                 "SELECT m.rowid AS rid, m.content AS c FROM memories m LEFT JOIN memories_fts_bi b "
-                "ON b.rowid = m.rowid WHERE b.rowid IS NULL ORDER BY m.rowid LIMIT 200").fetchall()
+                "ON b.rowid = m.rowid WHERE b.rowid IS NULL ORDER BY m.rowid LIMIT ?", (limit,)).fetchall()
             if not rows:
+                set_meta(conn, "fts_bigram", "1")
+                conn.commit()
                 break
             for r in rows:
                 conn.execute("INSERT OR REPLACE INTO memories_fts_bi(rowid, content) VALUES (?, ?)",
                              (r["rid"], bigram_text(fts_index_text(r["c"]))))
             conn.commit()
-        set_meta(conn, "fts_bigram", "1")
-        conn.commit()
+            if budget is not None:
+                budget -= len(rows)
     # Rebuild indexes produced with older text rules. Each bounded transaction
     # advances its cursor atomically with the two aligned FTS rows.
-    remaining_text = budget
-    while remaining_text is None or remaining_text > 0:
+    while budget is None or budget > 0:
         conn.execute("BEGIN IMMEDIATE")
         try:
             if get_meta(conn, "fts_text_rules") == FTS_TEXT_RULES:
                 conn.commit()
                 break
             cursor = int(get_meta(conn, "fts_text_cursor", 0))
-            limit = 200 if remaining_text is None else min(200, remaining_text)
+            limit = 200 if budget is None else min(200, budget)
             rows = conn.execute("SELECT rowid, content FROM memories WHERE rowid > ? ORDER BY rowid LIMIT ?",
                                 (cursor, limit)).fetchall()
             for row in rows:
@@ -747,10 +753,10 @@ def _repair(conn, cfg, max_records=None):
         except BaseException:
             conn.rollback()
             raise
+        if budget is not None:
+            budget -= len(rows)
         if len(rows) < limit:
             break
-        if remaining_text is not None:
-            remaining_text -= len(rows)
 
     # --- missing vectors / FTS rows
     remaining = budget
@@ -1619,21 +1625,22 @@ def cmd_list(since=None, until=None, fmt="text"):
 
 
 def cmd_recall_thread(turn_id, before=2, after=2, fmt="text"):
+    totals = sys.stderr if fmt == "jsonl" else sys.stdout
     conn = _read_db_if_exists()
     if conn is None:
         print(f"No DB found at {DB_PATH}", file=sys.stderr)
-        print("Total: 0 records")
+        print("Total: 0 records", file=totals)
         return 0
     try:
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(memories)")}
         if "turn_id" not in columns:
-            print("Total: 0 records")
+            print("Total: 0 records", file=totals)
             return 0
         anchor = conn.execute(
             "SELECT MIN(rowid) AS lo, MAX(rowid) AS hi FROM memories WHERE turn_id=?", (turn_id,)
         ).fetchone()
         if anchor["lo"] is None:
-            print("Total: 0 records")
+            print("Total: 0 records", file=totals)
             return 0
         session = conn.execute(
             "SELECT session_id FROM memories WHERE rowid=?", (anchor["lo"],)
@@ -1667,7 +1674,7 @@ def cmd_recall_thread(turn_id, before=2, after=2, fmt="text"):
                              ensure_ascii=False))
         else:
             print(_fmt_line(r))
-    print(f"Total: {len(rows)} records")
+    print(f"Total: {len(rows)} records", file=totals)
     return 0
 
 

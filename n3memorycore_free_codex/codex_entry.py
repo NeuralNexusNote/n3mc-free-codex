@@ -37,7 +37,7 @@ _SECRETS = re.compile(
     r"\bBearer\s+[A-Za-z0-9._~+/-]{16,}\b", re.I)
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"\b(?:api[_ -]?key|access[_ -]?token|secret|password|passwd|"
-    r"パスワード|秘密鍵|認証トークン)\s*[:=：]\s*([^\s`;,]+)", re.I)
+    r"パスワード|秘密鍵|認証トークン)[\"']?\s*[:=：]\s*[\"'`]?(\S+?)(?=[\"'`;,}\]\s]|$)", re.I)
 
 
 def _has_secrets(text):
@@ -71,6 +71,8 @@ def _strings(value):
         yield value
     elif isinstance(value, dict):
         for key, item in value.items():
+            if isinstance(item, str):
+                yield f"{key}: {item}"
             yield key
             yield from _strings(item)
     elif isinstance(value, list):

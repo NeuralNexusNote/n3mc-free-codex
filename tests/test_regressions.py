@@ -449,6 +449,7 @@ class TestServerApi:
                 assert not inspect.iscoroutinefunction(r.endpoint)
 
     def test_repair_max_records(self, app, conn, cfg):
+        n3m._repair(conn, cfg)  # Finish migrations before testing the vector-repair budget.
         for i in range(5):
             add(conn, cfg, f"unindexed {i}", embed=False)
         c = TestClient(app, base_url="http://127.0.0.1:18526")
