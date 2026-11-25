@@ -21,7 +21,7 @@ _HIRAGANA_ONLY_RE = re.compile(r'^[぀-ゟー]+$')
 # English function words (articles, pronouns, auxiliaries, question words, ...). They are in most
 # English records, so a query made of them matched almost everything: "Who is the CEO of the
 # company?" filled Top matches with 20 unrelated rows through `the` / `of` / `is`. Dropped from the
-# keyword terms when config "fts_stopwords" is true (the default since 2026-11-22; not in the spec).
+# keyword terms when config "fts_stopwords" is true (disabled by default).
 EN_STOPWORDS = frozenset("""
 a an the and or but if of to in on at by for with from as into onto about over under than then
 so too very just is are was were be been being am do does did done have has had having it its

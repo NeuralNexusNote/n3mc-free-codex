@@ -212,7 +212,7 @@ config.json
 .memory/
 
 # Claude Code per-user permissions (auto-grown during interactive sessions)
-.claude/settings.local.json
+.claude/
 
 # Local secrets and memory database sidecars
 .env.*
@@ -247,3 +247,7 @@ test_artifacts/review_20261118/retrieval-*/
 /docs/REVIEW_SCORECARD_20261118_JP.md
 /test_artifacts/cpu_upgrade_20261118/
 /test_artifacts/review_20261118/
+
+# Temporary verification data
+.pytest-tmp*/
+.review-tmp/

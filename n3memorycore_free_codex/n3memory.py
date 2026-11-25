@@ -1421,12 +1421,42 @@ def _connection_target(cfg=None):
     cfg = get_config() if cfg is None else cfg
     port = cfg.get("connect_server_port")
     root = cfg.get("connect_server_root")
+    if bool(port) != bool(root):
+        message = "Set both connect_server_port and connect_server_root; using standalone mode."
+        notice = _notices_read().get("connection_incomplete")
+        if not isinstance(notice, dict) or notice.get("message") != message:
+            _notify("connection_incomplete", message)
+    else:
+        _clear_notice("connection_incomplete")
     return (port, root) if port and root else None
 
 
-def _save_record(content, agent_name=None, session_id=None, turn_id=None, local_id=None):
-    if _connection_target():
-        return {"status": "error", "message": "Connected mode only supports search and hook auditing."}
+def _verified_target(target):
+    port, expected_root = target
+    health = _get_health(port)
+    root = health.get("root") if health else None
+    return (isinstance(root, str) and _os.path.isabs(root)
+            and _norm(root) == _norm(expected_root))
+
+
+def _save_record(content, agent_name=None, session_id=None, turn_id=None, local_id=None, project=None):
+    cfg = get_config()
+    target = _connection_target(cfg)
+    if target:
+        body = {"content": content, "agent_name": agent_name or AGENT_NAME,
+                "local_id": local_id or cfg["local_id"]}
+        for key, value in (("session_id", session_id), ("turn_id", turn_id), ("project", project)):
+            if value is not None:
+                body[key] = value
+        try:
+            if not _verified_target(target):
+                raise ValueError("configured server could not be verified")
+            result = _post("/buffer", body, port=target[0])
+            if not isinstance(result, dict) or result.get("status") not in ("ok", "skipped"):
+                raise ValueError("server did not confirm save")
+            return result
+        except Exception as exc:
+            return {"status": "error", "message": f"Connected save failed ({type(exc).__name__}); no local DB fallback."}
     if _use_server():
         body = {"content": content}
         for k, v in (("agent_name", agent_name), ("session_id", session_id), ("turn_id", turn_id),
@@ -1443,14 +1473,14 @@ def _save_record(content, agent_name=None, session_id=None, turn_id=None, local_
     return _buffer_direct(content, agent_name, session_id, turn_id, local_id)
 
 
-def _save_text(role, text, turn_id, session_id=None):
+def _save_text(role, text, turn_id, session_id=None, project=None):
     """Purify the whole message, chunk it, tag the chunks and save each. Returns (saved, failed)."""
     text = purify_text(text or "")
     if not text.strip():
         return 0, 0
     saved = failed = 0
     for rec in add_chunk_prefixes(role, chunk_text(text, 400, 40)):
-        r = _save_record(rec, AGENT_NAME, session_id, turn_id)
+        r = _save_record(rec, AGENT_NAME, session_id, turn_id, project=project)
         if r.get("status") == "ok":
             saved += 1
         elif r.get("status") == "error":
@@ -1469,16 +1499,14 @@ def _placeholder(body_line, notices):
 def _search_text(query, session_id=None, since=None, until=None, *, cfg=None):
     cfg = get_config() if cfg is None else cfg
     query = sanitize_surrogates(query or "")[:cfg["search_query_max_chars"]]
+    target = _connection_target(cfg)
     notices = _take_notices()
     if not query.strip():
         return _placeholder("_No relevant memories found._", notices)
-    target = _connection_target(cfg)
     port = None
     if target:
-        port, expected_root = target
-        health = _get_health(port)
-        root = health.get("root") if health else None
-        if not isinstance(root, str) or not _os.path.isabs(root) or _norm(root) != _norm(expected_root):
+        port = target[0]
+        if not _verified_target(target):
             return _placeholder("_(memory search unavailable: the configured server could not be verified)_", notices)
     elif not _use_server():
         return _placeholder(f"_(memory search unavailable: {_unavailable_reason()})_", notices)
@@ -1573,7 +1601,7 @@ def cmd_list(since=None, until=None, fmt="text"):
     conn = _read_db_if_exists()
     if conn is None:
         print(f"No DB found at {DB_PATH}", file=sys.stderr)
-        print("Total: 0 records")
+        print("Total: 0 records", file=sys.stderr if fmt == "jsonl" else sys.stdout)
         return 0
     try:
         rows = _database.get_all_memories(conn, b[0], b[1])
@@ -1581,11 +1609,12 @@ def cmd_list(since=None, until=None, fmt="text"):
         conn.close()
     for r in rows:
         if fmt == "jsonl":
-            print(json.dumps({k: r.get(k) for k in ("id", "timestamp", "agent_name", "content")},
+            print(json.dumps({k: r.get(k) for k in ("id", "timestamp", "agent_name", "content",
+                                                               "session_id", "turn_id", "owner_id", "local_id")},
                              ensure_ascii=False))
         else:
             print(_fmt_line(r))
-    print(f"Total: {len(rows)} records")
+    print(f"Total: {len(rows)} records", file=sys.stderr if fmt == "jsonl" else sys.stdout)
     return 0
 
 

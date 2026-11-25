@@ -69,7 +69,9 @@ def test_legacy_list_and_turn_reads_do_not_migrate_the_database(capsys):
     path = Path(memory.DB_PATH)
     before = path.read_bytes()
     assert memory.main(["--list", "--format", "jsonl"]) == 0
-    row, footer = capsys.readouterr().out.splitlines()
+    output = capsys.readouterr()
+    row = output.out.strip()
+    footer = output.err.strip()
     assert json.loads(row)["agent_name"] is None and footer == "Total: 1 records"
     for cmd in ("--recall-thread", "--show-turn"):
         assert memory.main([cmd, "unknown"]) == 0

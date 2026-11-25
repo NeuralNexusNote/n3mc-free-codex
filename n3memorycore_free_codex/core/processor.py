@@ -172,7 +172,8 @@ def chunk_text(text, max_chars=400, overlap=40):
                 if index >= 0 and positions[index] > cursor:
                     end = positions[index]
                     break
-        chunks.append(text[start:end])
+        if text[start:end].strip():
+            chunks.append(text[start:end])
         cursor = end
     return chunks
 
@@ -356,16 +357,12 @@ def hybrid_search(conn, query, cfg, session_id=None, since=None, until=None, emb
         print(f"Warning: vector search degraded (embed_query failed: {e})", file=sys.stderr)
 
     # --- keyword candidates (per table normalisation)
-    # Search improvements of 2026-11-22 (not in the spec; each can be turned off in config.json):
     # fts_stopwords drops English function words from the keyword terms; kw_only_min_terms keeps a
     # row that only the keywords found (cosine under vector_min_cos) out of Top matches unless it
     # contains that many distinct query terms (it can still come back as a weak match).
     stop = bool(cfg.get("fts_stopwords", False))
     min_terms = int(cfg.get("kw_only_min_terms", 0) or 0)
     q_terms = (fts_terms(query, stop), bigram_terms(query, stop)) if min_terms > 1 else None
-    # One incidental two-character overlap can receive the entire normalized
-    # BM25 score. Keep semantic ranking for longer Japanese/CJK questions.
-    cjk_terms = (fts_terms(query, stop), bigram_terms(query, stop)) if _is_cjk_text(query) else None
     small = count_memories(conn) <= 2
     actual_cos = {rec["id"]: cosine for rec, cosine in vec_hits}
     kw = {}   # id -> relevance
@@ -379,10 +376,6 @@ def hybrid_search(conn, query, cfg, session_id=None, since=None, until=None, emb
         raw = {rec["id"]: s for rec, s in hits}
         for rec, _ in hits:
             recs[rec["id"]] = rec
-            if (fn is search_fts_bigram and rec["id"] in actual_cos
-                    and cjk_terms and len(cjk_terms[1]) > 1
-                    and _matched_terms(rec["content"], cjk_terms) < 2):
-                raw.pop(rec["id"], None)
         for k, v in keyword_relevances(raw, cfg["bm25_min_threshold"], small).items():
             kw[k] = max(kw.get(k, 0.0), v)
 
@@ -390,7 +383,7 @@ def hybrid_search(conn, query, cfg, session_id=None, since=None, until=None, emb
         recs[rec["id"]] = rec
 
     floor = cfg["vector_min_cos"]
-    # cross_lang_min_cos (2026-11-22, not in the spec; 0 = off): the best vector hit written in the
+    # cross_lang_min_cos (0 = off): the best vector hit written in the
     # other script (CJK vs. not) counts as a vector match from this cosine on, below vector_min_cos.
     # A query and a record in different languages score lower with e5 than a same-language pair.
     cross_floor = float(cfg.get("cross_lang_min_cos", 0) or 0)
@@ -443,7 +436,7 @@ def hybrid_search(conn, query, cfg, session_id=None, since=None, until=None, emb
             results = [r for r in results if r.get("_version_group") or r["filter_score"] >= ratio * top]
     # step 5
     results = _collapse_identical_content(results)
-    # step 6 (top_matches_max, 2026-11-22, not in the spec: a cap on Top matches only; 0 = none, the
+    # step 6 (top_matches_max: a cap on Top matches only; 0 = none, the
     # vector candidates and the weak matches still use search_result_limit)
     strong_cap = min(limit, int(cfg.get("top_matches_max", 0) or 0) or limit)
     capped, per_turn = [], {}
@@ -568,8 +561,11 @@ def render_memory_context(query, results, pairs=None, pairs_omitted=None, notice
             for s in pairs.get(t, []):
                 lines.append(s["content"])
             if pairs_omitted.get(t):
-                full_text = ("Full text is stored on the connected server." if connected else
-                             f"Full text: `python -m n3memorycore_free_codex.n3memory --show-turn {t}`")
+                full_text = (
+                    f"Read full text with the connected product CLI: --show-turn {t} "
+                    f"or --recall-thread {t}, using its configured data root." if connected else
+                    f"Full text: `python -m n3memorycore_free_codex.n3memory --show-turn {t}`"
+                )
                 lines.append(f"_({pairs_omitted[t]} more chunk(s) of this exchange omitted. {full_text})_")
             lines.append("")
     return "\n".join(lines)

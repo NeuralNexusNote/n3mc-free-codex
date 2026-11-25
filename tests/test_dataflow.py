@@ -110,5 +110,7 @@ def test_valid_hits_survive_bad_supplement_and_unexpected_save_failure(monkeypat
 def test_connected_omission_preserves_turn_id_without_claiming_a_local_copy():
     context = p.render_memory_context("query", [], pairs_omitted={"remote-turn": 2}, connected=True)
     assert "remote-turn" in context and "2 more chunk(s)" in context
-    assert "stored on the connected server" in context
-    assert "--show-turn" not in context
+    assert "connected product CLI" in context
+    assert "--show-turn remote-turn" in context
+    assert "--recall-thread remote-turn" in context
+    assert "n3memorycore_free_codex.n3memory" not in context
