@@ -6,13 +6,14 @@ import sys
 import threading
 import time
 from bisect import bisect_right
+from collections import Counter
 from datetime import datetime, timezone
 
 from .database import (
     get_connection, init_db, insert_memory, search_vector, search_fts, search_fts_bigram,
     get_all_memories, delete_memory, count_memories, check_exact_duplicate,
     find_unindexed_memories, serialize_vector, get_memories_by_turn_id, strip_fts_punctuation,
-    deserialize_vector, fts_terms, bigram_terms, bigram_text,
+    deserialize_vector, fts_terms, bigram_terms, bigram_text, fts_index_text,
 )
 
 DEFAULT_MODEL = "intfloat/multilingual-e5-base"
@@ -334,6 +335,37 @@ def _rerank_by_reply(conn, query_vec, results, cfg):
         return results
 
 
+def _related_evidence_bonus(query, top_matches, pool):
+    """Score weak candidates using rare terms corroborated by distinct top turns."""
+    seeds = {}
+    for row in top_matches[:3]:
+        if row.get("turn_id"):
+            seeds.setdefault(row["turn_id"], row)
+    if len(seeds) < 2 or not pool:
+        return {}
+
+    def terms(row):
+        return set(bigram_terms(fts_index_text(row["content"]).casefold(), stopwords=True))
+
+    query_terms = set(bigram_terms(query.casefold()))
+    support = Counter(term for row in seeds.values() for term in terms(row) - query_terms)
+    corroborated = {term for term, count in support.items() if count >= 2}
+    if not corroborated:
+        return {}
+
+    candidates = {row["id"]: terms(row) & corroborated for row in [*top_matches, *pool]}
+    frequency = Counter(term for matched in candidates.values() for term in matched)
+    total = len(candidates)
+    weights = {
+        term: math.log1p((total - count + 0.5) / (count + 0.5))
+        for term, count in frequency.items() if count <= total / 4
+    }
+    return {
+        rid: 0.025 * sum(sorted((weights[t] for t in matched if t in weights), reverse=True)[:2])
+        for rid, matched in candidates.items() if matched
+    }
+
+
 def hybrid_search(conn, query, cfg, session_id=None, since=None, until=None, embed_fn=None):
     """Hybrid (vector + trigram FTS + bigram FTS) search with the v1.6 shaping pipeline."""
     global _warned_embed
@@ -456,7 +488,9 @@ def hybrid_search(conn, query, cfg, session_id=None, since=None, until=None, emb
         have_ids = {r["id"] for r in results}
         have_content = {r["content"] for r in results}
         pool = [p for p in pool if p["id"] not in have_ids and p["filter_score"] >= 1e-6]
-        pool.sort(key=lambda p: (p["filter_score"], p["timestamp"], p["id"]), reverse=True)
+        bonus = _related_evidence_bonus(query, results, pool)
+        pool.sort(key=lambda p: (p["filter_score"] + bonus.get(p["id"], 0.0),
+                                 p["timestamp"], p["id"]), reverse=True)
         for p in pool:
             if len(results) >= target:
                 break

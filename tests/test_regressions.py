@@ -769,6 +769,28 @@ class TestPackaging:
 
 
 class TestWeakMatches:
+    @pytest.mark.parametrize("seed_turns, expected", [
+        (("a", "b"), "related"),
+        (("a", "a"), "baseline"),
+    ])
+    def test_distinct_top_turns_promote_related_weak_match(self, conn, cfg, seed_turns, expected):
+        def insert(rid, content, turn, cosine):
+            db.insert_memory(conn, rid, content, ago(1), "owner", turn_id=turn,
+                             embedding=_vec_at(cosine))
+
+        insert("first", "[user] Amber marker", seed_turns[0], 0.95)
+        insert("second", "[claude] Amber trail", seed_turns[1], 0.94)
+        insert("related", "[user] Amber was found in the attic", "c", 0.78)
+        insert("baseline", "[user] Spare lantern", "d", 0.79)
+        for i in range(8):
+            insert(f"filler-{i}", f"[user] Inventory item {i}", f"filler-{i}", 0.70)
+
+        result = p.hybrid_search(conn, "decision", cfg, embed_fn=_e0)
+        assert [(r["id"], r["weak"]) for r in result["results"]] == [
+            ("first", False), ("second", False), (expected, True),
+        ]
+        assert "c" not in result["pairs"] and "d" not in result["pairs"]
+
     def test_fills_up_to_min_results_in_filter_score_order(self, conn, cfg):
         add(conn, cfg, "zebra stripes quagga")
         add(conn, cfg, "zebra mammals africa savanna")
