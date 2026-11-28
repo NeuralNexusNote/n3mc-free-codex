@@ -30,16 +30,16 @@ By using this software, you agree to the terms above.
 ### Generate in Codex
 
 1. Install Python 3.10 or newer and use a Codex client with command hooks. Open a dedicated empty folder or the existing Free Codex checkout in Codex. The editable installation continues to use that folder.
-2. Place this specification in the folder. Ask Codex: “Implement N3MemoryCore Free for Codex according to this specification. Generate the code in this folder and run the isolated tests.”
-3. Codex checks the destination, generates the files, and runs §6–§7 against disposable data. For an existing checkout, preserve unrelated files and recoverable local changes. Do not register the user's hooks as part of code-only regeneration.
-4. For a complete setup, Codex installs and registers from the authorized dedicated folder:
+2. Place this specification in the folder. Ask Codex: “Implement N3MemoryCore Free for Codex according to this specification. Generate the code here, install it in the selected Python environment, then register and verify both hooks in this Codex user's settings. Use disposable test data and show me the hooks to trust after registration.”
+3. Codex checks the destination, generates the files, and uses disposable data for checks that can run before hook trust. For an existing checkout, preserve unrelated files and recoverable local changes. The request above proceeds through step 4. Stop after generation and isolated testing if the user explicitly requests that scope.
+4. For a complete setup, Codex installs the package and registers the user's hooks from the authorized dedicated folder using the same Python interpreter. If using a virtual environment, substitute the absolute path to its Python executable:
 
 ```bash
 python -m pip install -e ".[test]"
-n3mc-free-codex --init
+python -m n3memorycore_free_codex.n3memory --init
 ```
 
-5. On Windows desktop, after registration, open the hidden icons menu in the taskbar, right-click the ChatGPT or Codex icon, choose Quit, and reopen the app. The user inspects and trusts both Free Codex hooks in Codex **Settings → Hooks** (CLI: `/hooks`). Reply in the setup chat with “I restarted and trusted both hooks.” Without waiting for another request, Codex runs §6 (including §6.1–§6.2), then §7, and reports the evidence for automatic saving in a new chat and cross-chat recall. The first semantic search may need to download the multilingual embedding model.
+5. On Windows desktop, after registration, open the hidden icons menu in the taskbar, right-click the ChatGPT or Codex icon, choose Quit, and reopen the app. The user inspects and trusts both Free Codex hooks in Codex **Settings → Hooks** (CLI: `/hooks`). If the hooks list is empty, follow the desktop troubleshooting steps in §4. Reply in the setup chat with “I restarted and trusted both hooks.” Without waiting for another request, Codex runs §6 (including §6.1–§6.2), then §7, and reports the evidence for automatic saving in a new chat and cross-chat recall. The first semantic search may need to download the multilingual embedding model.
 
 ### Installation destination and prerequisites
 
@@ -52,7 +52,9 @@ Before implementation, run `python --version` or `python3 --version` and confirm
 3. Sign out of Windows and sign in again, or restart the PC, so newly started applications see the updated PATH. Closing only the Codex window can leave a background process running with the old environment.
 4. In a new terminal, confirm `python --version`, reopen Codex in the same dedicated folder, and resume setup.
 
-Do not install Python itself from the implementing session. Explain that the user must refresh the Windows session after installing it. Install Python packages automatically with the selected working interpreter. For a complete setup, Codex runs `python -m pip install -e ".[test]"` and `n3mc-free-codex --init`, verifies both registrations, and shows their location and commands. Do not leave registration or executable checks as manual tasks for the user. Code-only regeneration uses disposable configuration and does not register real hooks. The user reviews and trusts the hooks; Codex must not grant or bypass that trust.
+Do not install Python itself from the implementing session. Explain that the user must refresh the Windows session after installing it. Install Python packages automatically with the selected working interpreter. For a complete setup, Codex runs `python -m pip install -e ".[test]"` and `python -m n3memorycore_free_codex.n3memory --init`, verifies both registrations, and shows their location and commands. Do not leave registration or executable checks as manual tasks for the user. Code-only regeneration uses disposable configuration and does not register real hooks. The user reviews and trusts the hooks; Codex must not grant or bypass that trust.
+
+Register with the same user and `CODEX_HOME` as the app, using a process that does not inherit the test override `N3MC_CODEX_HOOKS_PATH`. Read back the absolute path of `hooks.json` and exactly one entry for this product under each of `UserPromptSubmit` and `Stop` before guiding the user through restart and trust. If registration fails, report the exit status, error, and intended destination. Dependency or DB initialization errors can occur before the hooks file is written.
 
 On Windows, after installing dependencies, check the x64 Visual C++ runtime with:
 
@@ -975,6 +977,8 @@ Install the package into the selected Python environment before registering. `n3
 Merge only handlers for this edition and entry point. Recognize the legacy Free Codex module `n3memorycore.codex_entry` with the matching flag, as well as the new module. Preserve unrelated handlers, events, and fields. If the file is malformed, report the error and preserve its bytes. Skip an identical rewrite. For a change, back up the original and atomically replace it using a temporary file in the same directory. Keep Codex approval and sandbox settings as configured by the user.
 
 After registration, review and trust both handlers in Codex **Settings → Hooks**, or run `/hooks` in the interactive CLI. The user performs this step. Work in a new chat outside the installation checkout and verify both save and cross-chat search in §6. When a user requests source regeneration alone, use isolated settings and data for tests. Run registration against the user's actual settings only with their authorization. Free uses hooks and does not register an MCP server.
+
+With zero local projects, some desktop builds can show **No hooks found** even when both entries exist in the user `hooks.json`. First verify both entries in the file for the same user and `CODEX_HOME` as the app. If the entries are present, add or open a local folder as a project and reopen **Settings → Hooks**. If the desktop list remains empty, open `/hooks` in the interactive CLI with the same user and `CODEX_HOME` to review and trust both handlers. If the interactive CLI lists Installed 1 / Active 1 for both events, proceed with §6 and §7 using the existing active registrations. Verify registration, trust, and live saving and recall separately.
 
 ### Input and output
 
