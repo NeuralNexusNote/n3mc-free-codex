@@ -1,4 +1,4 @@
-# N3MemoryCore Free for Codex (n3mc-free-codex) v1.9.1
+# N3MemoryCore Free for Codex (n3mc-free-codex) v1.9.2
 
 **Give Codex a memory across conversations. Free, on your own PC.**
 
@@ -12,7 +12,7 @@ The primary deliverable is the **implementation specification**. Your own Codex 
 **For first-time users.** After building Free with the steps below, start a new chat in the same project and say “We chose blue for the prototype cover.” In another new chat, ask “Which color did we choose for the prototype cover?” Check the answer and the retrieved record. Keep the generated source and `tests/` for a later upgrade to Pro.
 
 1. Create a dedicated empty folder in File Explorer.
-2. Put `N3MemoryCore_v1.9.1_Free_EN.md` in that folder.
+2. Put `N3MemoryCore_v1.9.2_Free_EN.md` in that folder.
 3. Open the folder as a local workspace in Codex.
 4. Ask: “Implement this specification, complete setup, and run the verification tests.”
 5. Review and trust both registered hooks in **Settings → Hooks** (CLI: `/hooks`). Codex performs the tests that follow.
@@ -194,8 +194,8 @@ For Pro, choose the specification for your host. Check the destination and impor
 
 | File | Description |
 |---|---|
-| `N3MemoryCore_v1.9.1_Free_JP.md` | Free edition (Japanese) |
-| `N3MemoryCore_v1.9.1_Free_EN.md` | Free edition (English) |
+| `N3MemoryCore_v1.9.2_Free_JP.md` | Free edition (Japanese) |
+| `N3MemoryCore_v1.9.2_Free_EN.md` | Free edition (English) |
 
 > 💡 **A note on annotations in the specification**
 > Throughout the specification file (Markdown), you'll find annotations describing the design intent behind each instruction — written to give you precise control over AI behavior. Before having Codex generate the code, take a moment to read through them. They contain more than just code: the logic behind how to work with AI effectively.
@@ -207,12 +207,12 @@ For Pro, choose the specification for your host. Check the destination and impor
 ### Method A: Generate from the specification (primary, recommended)
 
 1. **Create a dedicated folder** — Start with an empty folder, for example `C:/Users/<you>/n3mc-free-codex`. The generated code stays in use there.
-2. **Add the specification** — Put `N3MemoryCore_v1.9.1_Free_EN.md` in the folder. Do not mix it with another project.
+2. **Add the specification** — Put `N3MemoryCore_v1.9.2_Free_EN.md` in the folder. Do not mix it with another project.
 3. **Open it in Codex** — Use that folder as a local workspace.
 4. **Ask for implementation** — Send:
 
 ```text
-Implement N3MemoryCore Free for Codex according to N3MemoryCore_v1.9.1_Free_EN.md. Complete prerequisite checks, installation, hook registration, and the tests in sections 6 and 7. After registration, show me the two hooks to review and trust. Once trusted, perform the test inputs and verification commands yourself and report the results in the Evidence Report.
+Implement N3MemoryCore Free for Codex according to N3MemoryCore_v1.9.2_Free_EN.md. Complete prerequisite checks, installation, hook registration, and the tests in sections 6 and 7. After registration, show me the two hooks to review and trust. Once trusted, perform the test inputs and verification commands yourself and report the results in the Evidence Report.
 ```
 
 Codex checks the destination, Python and dependencies, then generates the code, installs it and registers the hooks. An already authorized destination does not need another confirmation. It must not overwrite another project.

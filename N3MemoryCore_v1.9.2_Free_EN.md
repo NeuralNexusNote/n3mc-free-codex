@@ -1,4 +1,4 @@
-# N3MemoryCore Free for Codex v1.9.1 [Immutable Memory]
+# N3MemoryCore Free for Codex v1.9.2 [Immutable Memory]
 > A NeuralNexusNote™ product
 
 A local conversation memory for Codex. Two command hooks record the turn and retrieve related memories. SQLite commits each standalone save synchronously.
@@ -104,7 +104,7 @@ Implement local, durable episodic memory for Codex. Keep conversation text as sp
 | Data root override | `N3MC_HOME` | `N3MC_FREE_CODEX_HOME` |
 | Default loopback port | `18520` | `18526` |
 | Hook status message | `—` | `N3MC-Free-Codex memory` |
-| Version | `1.9.1` | `1.9.1` |
+| Version | `1.9.1` | `1.9.2` |
 
 ```text
 n3mc-free-codex/
@@ -112,7 +112,7 @@ n3mc-free-codex/
 ├── pyproject.toml
 ├── README.md / README_JP.md
 ├── LICENSE / NOTICE / CHANGELOG.md / PHILOSOPHY.md
-├── N3MemoryCore_v1.9.1_Free_EN.md / _JP.md
+├── N3MemoryCore_v1.9.2_Free_EN.md / _JP.md
 ├── n3memorycore_free_codex/
 │   ├── __init__.py
 │   ├── paths.py
@@ -146,7 +146,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "n3memorycore-free-codex"
-version = "1.9.1"
+version = "1.9.2"
 description = "Persistent hybrid-search memory store for Codex (Free Edition)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -251,7 +251,7 @@ text_to_embed = "query: " + keyword
 
 The embedding model is the `embed_model` field in `~/.n3mc-free-codex/config.json` (default `intfloat/multilingual-e5-base`, written into the file on first start). There is **no environment-variable override**: `config.json` always contains `embed_model`, so a `$N3MC_EMBED_MODEL` variable would never take effect (do not add one), and §3 allows the model to be changed only by a human editing `config.json`.
 
-**Load failures**: if the model cannot be loaded (offline first start, no Hugging Face cache, a misspelled `embed_model`), do not retry the load on every save and search. After a failure, `get_model()` raises immediately without trying again for 60 seconds (`MODEL_RETRY_SECONDS`), so saves fall back to records without vectors (re-indexed by a later `--repair`) and searches run keyword-only with the `embed_query` warning (§5) instead of each waiting for a download attempt. Print one line to stderr per failed attempt (at most once a minute).
+**Load failures**: if the model cannot be loaded (offline first start, no Hugging Face cache, a misspelled `embed_model`), do not retry the load on every save and search. After a failure, `get_model()` skips retrying that model for 60 seconds (`MODEL_RETRY_SECONDS`) and can try a different model immediately. During the retry delay, so saves fall back to records without vectors (re-indexed by a later `--repair`) and searches run keyword-only with the `embed_query` warning (§5) instead of each waiting for a download attempt. Print one line to stderr per failed attempt (at most once a minute for the same model).
 
 Examples a user might configure:
 
@@ -1200,9 +1200,9 @@ After computing scores, `hybrid_search` shapes the results in the following orde
 
 ---
 
-## 6. Autonomous evaluation ([N3MC v1.9.1 Evidence Report])
+## 6. Autonomous evaluation ([N3MC v1.9.2 Evidence Report])
 
-After implementation, autonomously run the following tests, resolve failures, and report the results in the **N3MC v1.9.1 Evidence Report**, aiming for full marks (⭐⭐⭐⭐⭐). Run §7 automated tests as well. Perform test inputs and verification commands yourself wherever the available tools permit; do not delegate executable checks to the user.
+After implementation, autonomously run the following tests, resolve failures, and report the results in the **N3MC v1.9.2 Evidence Report**, aiming for full marks (⭐⭐⭐⭐⭐). Run §7 automated tests as well. Perform test inputs and verification commands yourself wherever the available tools permit; do not delegate executable checks to the user.
 
 **Completion criteria**: Execute the isolated tests, verify hook registration, and, after the user has reviewed and trusted the hooks, verify live hook operation and cross-chat recall. Record the evidence and results for each §6 item and the §7 test results in the Evidence Report. Report registration, trust, live operation, and automated tests separately. An unavailable test remains a required unfinished item; state the blocker and rerun it when the prerequisite becomes available. Time pressure, tool limitations or a passing subset do not permit deletion or waiver of a check. Full marks are a target, not a predetermined result: explicitly report failures, skipped tests, and unverified steps, and do not claim full marks or complete verification while required checks remain failed or unverified.
 
@@ -1413,7 +1413,7 @@ Embeddings are replaced with deterministic fake vectors built from `zlib.crc32` 
 | `TestTimeBounds` | A date-only `--since` is local midnight converted to UTC (with a fixed non-UTC time zone); an offset value is honoured; `T` and space separators give the same bound; `yesterday` exits with status 2 and an error line; `since > until` is an error; when `astimezone()` raises `OSError` (replaced), `--since 1969-01-01` and `--until 9999-12-31` raise no exception and are read as UTC |
 | `TestDbCorrupt` | Two corruptions give two backups (`n3memory.db.corrupt-<time>.bak`) with their `-wal` / `-shm` moved alongside, not deleted; the `db_corrupt` notice appears; `quick_check` runs once per process; a file of garbage and a DB with a damaged first page are set aside on the next direct save and on the startup check, with the `db_corrupt` notice; `OperationalError` and the sqlite-vec failure are not treated as corruption |
 | `TestSaveFailedNotice` | After one direct save fails (`save_failed` is set), a later save through the server (`/buffer` replaced by a fake that answers `ok`) removes the notice, and so does one that answers `skipped` |
-| `TestModelRetry` | After a failed model load, `get_model()` does not try again for 60 seconds (load function replaced by a fake); `$N3MC_EMBED_MODEL` has no effect |
+| `TestModelRetry` | After a failed model load, `get_model()` does not retry that model for 60 seconds and can try another model immediately (load function replaced by a fake); `$N3MC_EMBED_MODEL` has no effect |
 | `TestPackaging` | `psutil` is listed in `pyproject.toml` `dependencies` |
 | `TestWeakMatches` | With one result passing the floors and `min_results: 3`, two weak rows are added, ordered by `filter_score`, marked `"weak": true` in `/search` and placed after the normal row; a candidate below `vector_min_cos` is added with its actual cos (its `filter_score` uses that cos); `min_results: 0` adds nothing; nothing is added when enough results pass; `search_result_limit` smaller than `min_results` caps the total; a weak candidate identical to a result row, or from a `turn_id` that already has 2 rows, is skipped; a candidate with `filter_score` below `1e-6` (an orthogonal vector) is never added; weak rows are not used for `pairs`; an empty query returns no weak rows |
 
@@ -1477,7 +1477,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 Set the model to **Sol** and paste the following:
 
 ```
-Please implement N3MemoryCore according to this specification. Complete the authorized installation and hook registration, show me the two hooks to review and trust, then autonomously execute sections 6 (including 6.1–6.2) and 7 and report the N3MC v1.9.1 Evidence Report. Run the test inputs and verification commands yourself.
+Please implement N3MemoryCore according to this specification. Complete the authorized installation and hook registration, show me the two hooks to review and trust, then autonomously execute sections 6 (including 6.1–6.2) and 7 and report the N3MC v1.9.2 Evidence Report. Run the test inputs and verification commands yourself.
 ```
 
 Codex completes generation, isolated checks, installation and registration within the authorized scope. The user reviews and trusts the two hooks; Codex then performs the live and automated evaluations. Do not substitute code generation or CLI smoke tests for verified automatic memory. Proceed to Phase 2 after reading the Evidence Report.

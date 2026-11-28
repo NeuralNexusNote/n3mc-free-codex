@@ -748,13 +748,31 @@ class TestSaveFailedNotice:
 class TestModelRetry:
     def test_no_retry_for_60_seconds_after_a_failure(self, monkeypatch):
         monkeypatch.setattr(p, "_model", None)
-        monkeypatch.setattr(p, "_model_failed_at", None)
+        monkeypatch.setattr(p, "_model_failures", {})
         calls = []
         monkeypatch.setattr(p, "_load_model", lambda name: calls.append(name) or (_ for _ in ()).throw(OSError("offline")))
         for _ in range(3):
             with pytest.raises(Exception):
                 p.get_model("some/model")
         assert len(calls) == 1
+
+    def test_failed_model_does_not_delay_switch_to_another_model(self, monkeypatch):
+        monkeypatch.setattr(p, "_model", None)
+        monkeypatch.setattr(p, "_model_name", None)
+        monkeypatch.setattr(p, "_model_failures", {})
+        available = object()
+
+        def load(name):
+            if name == "unavailable/model":
+                raise OSError("offline")
+            return available
+
+        monkeypatch.setattr(p, "_load_model", load)
+        with pytest.raises(OSError):
+            p.get_model("unavailable/model")
+        assert p.get_model("cached/model") is available
+        with pytest.raises(RuntimeError, match="unavailable"):
+            p.get_model("unavailable/model")
 
     def test_env_var_has_no_effect(self, monkeypatch):
         monkeypatch.setenv("N3MC_EMBED_MODEL", "other/model")

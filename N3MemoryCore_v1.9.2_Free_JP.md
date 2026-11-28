@@ -1,4 +1,4 @@
-# N3MemoryCore Free Codex版 v1.9.1 [Immutable Memory]
+# N3MemoryCore Free Codex版 v1.9.2 [Immutable Memory]
 > NeuralNexusNote™ 製品
 
 Codexの会話をローカルに保存し、関連する記録を呼び戻します。コマンドフックを2つ使い、単独運用の保存はSQLiteへ同期コミットします。
@@ -104,7 +104,7 @@ Codexの会話をローカルで永続化します。§5に従って本文を保
 | データ位置の環境変数 | `N3MC_HOME` | `N3MC_FREE_CODEX_HOME` |
 | 既定のループバックポート | `18520` | `18526` |
 | フックの表示名 | `—` | `N3MC-Free-Codex memory` |
-| 版 | `1.9.1` | `1.9.1` |
+| 版 | `1.9.1` | `1.9.2` |
 
 ```text
 n3mc-free-codex/
@@ -112,7 +112,7 @@ n3mc-free-codex/
 ├── pyproject.toml
 ├── README.md / README_JP.md
 ├── LICENSE / NOTICE / CHANGELOG.md / PHILOSOPHY.md
-├── N3MemoryCore_v1.9.1_Free_EN.md / _JP.md
+├── N3MemoryCore_v1.9.2_Free_EN.md / _JP.md
 ├── n3memorycore_free_codex/
 │   ├── __init__.py
 │   ├── paths.py
@@ -146,7 +146,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "n3memorycore-free-codex"
-version = "1.9.1"
+version = "1.9.2"
 description = "Persistent hybrid-search memory store for Codex (Free Edition)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -251,7 +251,7 @@ text_to_embed = "query: " + keyword
 
 埋め込みモデルは `~/.n3mc-free-codex/config.json` の `embed_model` フィールドで決まる（デフォルト `intfloat/multilingual-e5-base`。初回起動時にファイルへ書き込まれる）。**環境変数による上書きはない**: `config.json` には常に `embed_model` があるので、`$N3MC_EMBED_MODEL` のような変数を設けても効かない（設けないこと）。また §3 はモデルの変更を人間による `config.json` の編集だけに限っている。
 
-**読み込みの失敗**: モデルを読み込めない場合（オフラインでの初回起動、Hugging Face のキャッシュがない、`embed_model` の綴り間違い）、保存や検索のたびに読み込みを再試行しない。失敗したあと 60 秒間（`MODEL_RETRY_SECONDS`）は `get_model()` が再試行せずにすぐ例外を出す。これにより、保存はそれぞれダウンロードの試行を待たずにベクトルなしのレコードに切り替わり（後の `--repair` で再インデックスされる）、検索は `embed_query` の警告（§5）付きでキーワードのみになる。失敗した試行ごとに stderr へ 1 行出す（多くても 1 分に 1 回）。
+**読み込みの失敗**: モデルを読み込めない場合（オフラインでの初回起動、Hugging Face のキャッシュがない、`embed_model` の綴り間違い）、保存や検索のたびに読み込みを再試行しない。失敗したモデルは 60 秒間（`MODEL_RETRY_SECONDS`）再試行せずに例外を出す。別のモデルの読み込みはすぐ試す。これにより、保存はそれぞれダウンロードの試行を待たずにベクトルなしのレコードに切り替わり（後の `--repair` で再インデックスされる）、検索は `embed_query` の警告（§5）付きでキーワードのみになる。失敗した試行ごとに stderr へ 1 行出す（同じモデルについて多くても 1 分に 1 回）。
 
 ユーザーが設定し得る例:
 
@@ -1196,9 +1196,9 @@ python -m n3memorycore_free_codex.n3memory --show-turn <turn_id>
 
 ---
 
-## 6. 自律評価（[N3MC v1.9.1 Evidence Report]）
+## 6. 自律評価（[N3MC v1.9.2 Evidence Report]）
 
-実装完了後、以下のテストを自律実行し、不合格の原因を修正して、満点（⭐⭐⭐⭐⭐）を目標に **N3MC v1.9.1 Evidence Report** で結果を報告せよ。§7の自動テストも実行する。利用可能なツールで実行できるテスト入力・確認コマンドは自分で実行し、利用者に代行させない。
+実装完了後、以下のテストを自律実行し、不合格の原因を修正して、満点（⭐⭐⭐⭐⭐）を目標に **N3MC v1.9.2 Evidence Report** で結果を報告せよ。§7の自動テストも実行する。利用可能なツールで実行できるテスト入力・確認コマンドは自分で実行し、利用者に代行させない。
 
 **実装完了の定義**: 隔離環境のテストを実行し、フック登録を検証する。利用者がフックを確認して信頼した後、実機フックの動作とチャットをまたぐ検索を確認する。§6の各項目の根拠と結果、および§7のテスト結果をEvidence Reportに記録し、登録・信頼・実機動作・自動テストを分けて報告する。実行できない試験も必須の未完了項目として残し、妨げている条件を示し、条件が揃ったら再実行する。時間やツールの制約、部分試験の成功を理由に確認項目を削除・免除しない。満点は目標であり、あらかじめ決めた結果ではない。不合格・スキップ・未確認は明記し、必須の確認に不合格や未確認が残る間は、満点・検証完了と報告しない。
 
@@ -1407,7 +1407,7 @@ python -m pytest tests -q --ignore=tests/test_api.py -k "not TestEmbedding"
 | `TestTimeBounds` | 日付だけの `--since` はローカルの 0 時を UTC に直したもの（UTC 以外の固定のタイムゾーンで）、オフセット付きの値はそのオフセットを守る、`T` と空白の区切りで同じ境界になる、`yesterday` はエラーの行を出して終了ステータス 2、`since > until` はエラー、`astimezone()` が `OSError` を投げるとき（差し替え）、`--since 1969-01-01` と `--until 9999-12-31` は例外にならず UTC として読まれる |
 | `TestDbCorrupt` | 2 回の破損で 2 つのバックアップ（`n3memory.db.corrupt-<time>.bak`）ができ、`-wal` / `-shm` は削除されずに隣へ移される、知らせ `db_corrupt` が出る、`quick_check` は 1 プロセスに 1 回。中身がごみのファイルと、先頭のページが壊れた DB は、次の直接保存と起動時の確認で退避され、`db_corrupt` の通知が出る。`OperationalError` と sqlite-vec の失敗は破損として扱わない |
 | `TestSaveFailedNotice` | 直接の保存が 1 回失敗したあと（`save_failed` がある）、サーバー経由の保存（`/buffer` を `ok` と答える偽物に差し替え）で知らせが消える。`skipped` と答えたときも消える |
-| `TestModelRetry` | モデルの読み込みに失敗したあと、`get_model()` は 60 秒間再試行しない（読み込み関数は偽物に差し替え）、`$N3MC_EMBED_MODEL` は効かない |
+| `TestModelRetry` | モデルの読み込みに失敗したあと、`get_model()` は同じモデルを 60 秒間再試行しない。別のモデルは直ちに試す（読み込み関数は偽物に差し替え）、`$N3MC_EMBED_MODEL` は効かない |
 | `TestPackaging` | `psutil` が `pyproject.toml` の `dependencies` に入っている |
 | `TestWeakMatches` | 下限を通った結果が 1 件で `min_results: 3` なら弱い候補が 2 件足され、`filter_score` の順に並び、`/search` で `"weak": true` が付き、普通の行の後に来る、`vector_min_cos` 未満の候補は実際の cos で足される（`filter_score` もその cos で計算）、`min_results: 0` では何も足さない、十分な件数が通ったときは足さない、`search_result_limit` が `min_results` より小さければ合計はその上限まで、結果の行と同じ content の候補や、すでに 2 件ある `turn_id` の候補は飛ばす、`filter_score` が `1e-6` 未満の候補（直交するベクトル）は足さない、弱い候補は `pairs` に使わない、空のクエリでは弱い候補も返さない |
 
@@ -1470,7 +1470,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 モデルを **Sol** に設定し、以下を貼り付けてください。
 
 ```
-この指示書に従って N3MemoryCore を実装してください。了承済みのインストールとフック登録まで行い、私が確認して信頼する対象の2フックを示してください。信頼後は§6（§6.1〜§6.2を含む）と§7を自律実行し、N3MC v1.9.1 Evidence Reportで報告してください。テスト入力と確認コマンドも自分で実行してください。
+この指示書に従って N3MemoryCore を実装してください。了承済みのインストールとフック登録まで行い、私が確認して信頼する対象の2フックを示してください。信頼後は§6（§6.1〜§6.2を含む）と§7を自律実行し、N3MC v1.9.2 Evidence Reportで報告してください。テスト入力と確認コマンドも自分で実行してください。
 ```
 
 Codexが了承済みの範囲でコード生成・隔離確認・インストール・登録を行います。利用者が2フックを確認して信頼した後、Codexが実機評価と自動テストを実行します。コード生成やCLIの簡易試験だけを自動記憶の動作確認の代わりにしません。Evidence Reportを確認してフェーズ2へ進みます。
