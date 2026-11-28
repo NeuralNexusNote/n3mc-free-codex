@@ -39,7 +39,7 @@ python -m pip install -e ".[test]"
 n3mc-free-codex --init
 ```
 
-5. The user inspects and trusts both Free Codex hooks in Codex **Settings → Hooks** (CLI: `/hooks`). Codex then runs §6.1–§6.2 and §7, including new-chat automatic saving and cross-chat recall, and reports the evidence. The first semantic search may need to download the multilingual embedding model.
+5. On Windows desktop, after registration, open the hidden icons menu in the taskbar, right-click the ChatGPT or Codex icon, choose Quit, and reopen the app. The user inspects and trusts both Free Codex hooks in Codex **Settings → Hooks** (CLI: `/hooks`). Reply in the setup chat with “I restarted and trusted both hooks.” Without waiting for another request, Codex runs §6 (including §6.1–§6.2), then §7, and reports the evidence for automatic saving in a new chat and cross-chat recall. The first semantic search may need to download the multilingual embedding model.
 
 ### Installation destination and prerequisites
 
@@ -112,6 +112,7 @@ n3mc-free-codex/
 ├── n3memorycore_free_codex/
 │   ├── __init__.py
 │   ├── paths.py
+│   ├── project.py
 │   ├── n3memory.py
 │   ├── codex_entry.py
 │   ├── codex_install.py
@@ -946,19 +947,19 @@ Existing user DBs MUST continue to operate under the new specification without r
 |---|---|
 | `--help` | Prints usage and exits with status 0. Running without a command also prints usage. |
 | `--init` | Initializes local config and, in standalone mode, the DB. Writes or reuses the two hook registrations and prints their location or reuse. The user grants trust separately. |
-| `--buffer TEXT [--agent-id NAME]` | Save locally in standalone mode or to the verified target in connected mode. A text argument of `-` reads UTF-8 stdin. `NAME` is written to `agent_name`. Prints `Saved 1 record.` or a skip reason on stdout (status 0). Prints a save failure on stderr (status 1). |
+| `--buffer TEXT [--agent-id NAME]` | Save locally in standalone mode or to the verified target in connected mode. A text argument of `-` reads UTF-8 stdin. Invalid UTF-8 reports an error on stderr and exits with status 1 without saving. `NAME` is written to `agent_name` unchanged, including an explicitly empty string. Prints `Saved 1 record.` or a skip reason on stdout (status 0). Prints a save failure on stderr (status 1). |
 | `--search QUERY [--since DATE] [--until DATE]` | Prints recalled memory Markdown. Connected mode queries the verified original server. An unavailable search prints its reason in the Markdown (status 0). An invalid time bound prints an error on stderr (status 2). |
 | `--list [--since DATE] [--until DATE] [--format text\|jsonl]` | Lists local records; text ends with `Total: N records`. Text uses the four tab-separated columns in §6. JSONL preserves all eight identity/content fields and sends its total to stderr, leaving stdout valid JSONL. |
 | `--show-turn ID` | Prints full local records with their IDs and display times, in user-before-reply order, ending with the total. |
-| `--recall-thread ID [--before N] [--after N] [--format text\|jsonl]` | Prints the local target and its same-conversation neighbors in rowid order. Both counts default to 2. The output ends with the total. |
+| `--recall-thread ID [--before N] [--after N] [--format text\|jsonl]` | Prints the local target and its same-conversation neighbors in rowid order. Both counts default to 2. Negative counts are treated as zero. The total goes to stdout in text mode and stderr in JSONL mode. |
 | `--repair` | Requests unbounded standalone index repair. Prints the repaired count when positive. A server unavailable before repair yields a skip notice on stderr (status 0). A failed request or invalid response reports an error (status 1). |
-| `--reembed` | Rebuilds standalone vectors in batches. Reports progress on stderr and the completed count on stdout. A failed preflight exits with status 1 without changing the vectors or resume cursor. |
-| `--hook-submit` | Compatibility entry for `UserPromptSubmit`. Reads UTF-8 event JSON on stdin and returns the context JSON, or empty stdout for an excluded turn. |
+| `--reembed` | Rebuilds standalone vectors in batches. Reports progress on stderr and the completed count on stdout. A failed preflight or invalid stored resume cursor reports the reason on stderr and exits with status 1 without changing the vectors or resume cursor. |
+| `--hook-submit` | Compatibility entry for `UserPromptSubmit`. Reads UTF-8 event JSON on stdin and returns the context JSON, or a JSON object with a `systemMessage` and no message body for an excluded turn. |
 | `--save-claude-turn` | Compatibility entry for `Stop`. Reads UTF-8 event JSON on stdin and normally leaves stdout empty. Both compatibility entries follow §4 for status messages and errors. |
 | `--stop` | Rotates the local audit log and expires old skip markers. Normally quiet. The resident server stays running. |
 | `--run-server` | Internal entry for the local FastAPI process. If a healthy memory server already listens on the configured port, report the conflict (status 1) and leave that server's PID file intact. |
 
-Supply one command per invocation. Options belong to the commands shown above. Conflicting commands and misplaced options exit with status 2. If the local DB is absent, the three listing and turn-reading commands print `No DB found at <path>` on stderr and `Total: 0 records` on stdout.
+Supply one command per invocation. Options belong to the commands shown above. Conflicting commands and misplaced options exit with status 2. If the local DB is absent, the three listing and turn-reading commands print `No DB found at <path>` on stderr and exit with status 0. `Total: 0 records` goes to stdout in text mode and stderr in JSONL mode. JSONL stdout is empty.
 
 `--agent-id` is an agent label. Free does not offer data import, export or individual deletion commands. Its Pro-only HTTP routes retain their existing error responses.
 
@@ -1078,7 +1079,7 @@ python -m n3memorycore_free_codex.n3memory --show-turn <turn_id>
 
 An eligible nonblank message is preserved without a minimum length or routine-response filter. Before chunking, run `purify_text` once over the entire message and replace fenced code with `[code omitted]`; preserve inline backticks. Slice the original text at paragraph or sentence boundaries when possible, then at a fixed width, with `max_chars=400` and `overlap=40`. Preserve whitespace, including indentation, tabs, and line endings, within nonblank chunks. Discard whitespace-only chunks before assigning `i/N` numbers. Persist `[user]` or `[user i/N]` for prompts and `[claude]` or `[claude i/N]` for replies. Both sides carry Codex's `session_id` and `turn_id`, and `agent_name: codex`.
 
-Apply the Free Codex no-save and secret filters before logging, searching or buffering. Recognize explicit no-save requests in Japanese or English, including この会話の保存はやめてください and “Please don’t save this reply” with a typographic apostrophe and credential patterns such as private-key blocks, service tokens, bearer tokens, or assignments of secret-like values. Ordinary implementation questions are not no-save requests: do not exclude “この関数は結果を保存しないで返すように直して” or “Why does the hook never save the reply when the server is down?”. Environment-variable references, explicit dummy values such as `xxxxxx`, and explanatory prose such as `API key: 環境変数から読みます` are not credential values. A matching prompt creates only the empty marker `.memory/skip_<sha256(session_id + NUL + turn_id)>` and suppresses its reply. A reply with a detected credential is excluded; an already saved prompt remains. Validate and sanitize before persisting; report exclusions using `systemMessage` and stderr without recording raw text. Do not depend on successful-hook stderr being visible.
+Apply the Free Codex no-save and secret filters before logging, searching or buffering. Recognize explicit no-save requests in Japanese or English, including この会話の保存はやめてください and “Please don’t save this reply” with a typographic apostrophe, including requests separated by Unicode line breaks. Detect credential patterns such as private-key blocks, service tokens, bearer tokens, or assignments of secret-like values. Ordinary implementation questions are not no-save requests: do not exclude “この関数は結果を保存しないで返すように直して” or “Why does the hook never save the reply when the server is down?”. Environment-variable references, explicit dummy values such as `xxxxxx`, and explanatory prose such as `API key: 環境変数から読みます` are not credential values. A matching prompt creates only the empty marker `.memory/skip_<sha256(session_id + NUL + turn_id)>` and suppresses its reply. A reply with a detected credential is excluded; an already saved prompt remains. Validate and sanitize before persisting; report exclusions using `systemMessage` and stderr without recording raw text. Do not depend on successful-hook stderr being visible.
 
 Include the stored turn_id in each strong or weak result heading when present. This lets the reader open a local turn even when supplementary exchanges are omitted.
 
@@ -1106,7 +1107,7 @@ Exact deduplication compares only within the supplied `turn_id`, or across the D
 
 ### 5.4 Q-A pairing and output
 
-The two hooks forward the same host `turn_id`. Reconstruct sibling rows with user chunks first, reply chunks second, and rowid order within each role. `/search` returns `results`, `pairs` and `pairs_omitted`. Include only strong results when choosing up to `pair_top_n` supplementary exchanges and enforce `pair_max_chars`. Direct CLI search prints Markdown to stdout. The hook sends Markdown through `additionalContext`. A failed supplementary exchange lookup leaves ranked hits available. An invalid ranked payload is reported as unavailable and the prompt still follows the normal save path. If prompt saving fails after lookup, a status message accompanies the recalled context. The host can shorten large hook outputs according to its own `additionalContextLimit`; stored records are unaffected. No memory context file is generated.
+The two hooks forward the same host `turn_id`. Reconstruct sibling rows with user chunks first, reply chunks second, and rowid order within each role. `/search` returns `results`, `pairs` and `pairs_omitted`. Include only strong results when choosing up to `pair_top_n` supplementary exchanges and enforce `pair_max_chars`. Direct CLI search prints Markdown to stdout. The hook sends Markdown through `additionalContext`. A failed supplementary exchange lookup leaves ranked hits available. If part of a search response is malformed, keep the valid ranked results and supplementary chunks in their original order and report that part of the response was omitted. A malformed payload with no valid ranked rows is reported as unavailable. Strip lone surrogate code points from the rendered output. The prompt follows the normal save path in each case. If prompt saving fails after lookup, a status message accompanies the recalled context. The host can shorten large hook outputs according to its own `additionalContextLimit`; stored records are unaffected. No memory context file is generated.
 
 ### Supplementary exchange rendering
 
@@ -1204,7 +1205,7 @@ Source regeneration and tests do not push changes, publish to PyPI, or write to 
 
 Group configuration-changing checks last, preserve `HF_HOME` when replacing HOME/USERPROFILE, and reuse the model and one resident server per test target. During fixes run the affected tests; run the full §7 suite once after the fixes are complete.
 
-Report installation/registration paths and commands, the user's trust state, every §6 result with measured evidence, §6.1–§6.2 live outcomes, and §7 pass/fail/skip counts. If trust is pending, lead with the exact place and two handlers the user must review. Once the user returns after trust, resume the autonomous checks; do not ask the user to run verification commands. Claim working automatic memory only after live evidence exists. Describe the Codex trust or restart action actually required and confirmed, including how the user completes it.
+Report installation/registration paths and commands, the user's trust state, every §6 result with measured evidence, §6.1–§6.2 live outcomes, and §7 pass/fail/skip counts. If trust is pending, lead with the exact place and two handlers the user must review. Once the user returns after trust, run §6 (including §6.1–§6.2), then §7, without waiting for another request. When all required checks in both sections pass, Codex displays “Starting with the next session, your chats can be saved.” with the results. Report failures or unverified checks and withhold this completion message until they pass. Codex runs the verification commands. Claim working automatic memory only after live evidence exists. Describe the Codex trust or restart action actually required and confirmed, including how the user completes it.
 
 1. **Resident Speed & Process Management**: Measure and record the response time of `--search` (target: up to 2.0s on CPU). Verify that PID file creation, deletion, and restart function correctly.
 
@@ -1215,7 +1216,7 @@ Report installation/registration paths and commands, the user's trust state, eve
    ```
 
    - The columns are joined with a single tab (`\t`), not spaces.
-   - "First 80 characters of content" means `content[:80]` — the leading 80 characters of the **full content string**, NOT of the first line. Newlines (`\n`, `\r`) within those 80 characters MUST be replaced with a single space so the tab-separated layout stays on one line per record.
+   - "First 80 characters of content" means `content[:80]` — the leading 80 characters of the **full content string**, NOT of the first line. Each newline (`\n`, `\r`) or tab (`\t`) within a field MUST be replaced with one space so the tab-separated layout stays on one line per record.
    - If `agent_name` is `NULL`, render it as `-`.
    - Output the total record count `Total: N records` at the end.
    - Statically confirm during code review that `write_buffer`, `batch_insert`, asynchronous writes, and deferred COMMITs are absent.
@@ -1501,7 +1502,7 @@ Please make any necessary corrections.
 **③ Cross-Session Test** (verify data persists across sessions)
 ```
 Regarding N3MemoryCore:
-Please run the commands yourself to verify whether the results of saving with --buffer in Session 1 and using --search in Session 2 are visible to Codex.
+Use the same temporary data root in two independent Codex sessions with hooks disabled. In session 1, save a unique synthetic value with --buffer, verify the committed SQLite row, then stop the test server. In session 2, run --search with a query that omits the value. Pass when both commands exit with status 0, the server restarts, and Codex in session 2 can read the value from search stdout.
 Please make any necessary corrections.
 ```
 

@@ -107,6 +107,46 @@ def test_buffer_stdio_and_explicit_empty_agent_match_server_and_output(conn, mon
     assert capsys.readouterr().out.splitlines()[0].split("\t")[2] == ""
 
 
+def test_buffer_rejects_invalid_utf8_without_saving(monkeypatch, capsys):
+    monkeypatch.setattr(memory.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"before\xffafter")))
+    assert memory.main(["--buffer", "-"]) == 1
+    output = capsys.readouterr()
+    assert output.out == "" and "stdin must be valid UTF-8" in output.err
+    assert not Path(memory.DB_PATH).exists()
+
+
+def test_connected_buffer_keeps_explicit_empty_agent(monkeypatch, tmp_path, capsys):
+    captured = {}
+    target = (19520, str(tmp_path))
+    monkeypatch.setattr(memory, "_connection_target", lambda *_: target)
+    monkeypatch.setattr(memory, "_verified_target", lambda info: info == target)
+
+    def post(path, body, *, port):
+        assert path == "/buffer" and port == target[0]
+        captured.update(body)
+        return {"status": "ok", "count": 1}
+
+    monkeypatch.setattr(memory, "_post", post)
+    assert memory.main(["--buffer", "connected record", "--agent-id="]) == 0
+    assert captured["agent_name"] == "" and capsys.readouterr().out == "Saved 1 record.\n"
+    assert not Path(memory.DB_PATH).exists()
+
+
+def test_recall_thread_accepts_limits_larger_than_a_sqlite_integer(conn, capsys):
+    for i, (session, turn) in enumerate([("one", "previous"), ("two", "unrelated"),
+                                         ("one", "anchor"), ("one", "following")]):
+        conn.execute("INSERT INTO memories (id, content, timestamp, owner_id, session_id, turn_id) "
+                     "VALUES (?, ?, '2026-11-28T00:00:00+00:00', 'owner', ?, ?)",
+                     (f"row-{i}", turn, session, turn))
+    conn.commit()
+    large = str(1 << 63)
+    assert memory.main(["--recall-thread", "anchor", "--before", large, "--after", large,
+                        "--format", "jsonl"]) == 0
+    output = capsys.readouterr()
+    assert [json.loads(line)["turn_id"] for line in output.out.splitlines()] == ["previous", "anchor", "following"]
+    assert output.err == "Total: 3 records\n"
+
+
 @pytest.mark.parametrize("response", [{"status": "error"}, {"status": "ok", "count": -1}, {}])
 def test_invalid_repair_response_is_a_cli_failure(monkeypatch, capsys, response):
     monkeypatch.setattr(memory, "_use_server", lambda: True)
@@ -153,3 +193,17 @@ def test_reembed_will_not_write_when_local_server_cannot_stop(conn, monkeypatch,
     assert memory.main(["--reembed"]) == 1
     assert "could not stop" in capsys.readouterr().err
     assert conn.execute("SELECT COUNT(*) FROM meta").fetchone()[0] == 0
+
+
+def test_reembed_reports_corrupt_resume_cursor_without_changing_index(conn, monkeypatch, capsys):
+    model = memory.get_config()["embed_model"]
+    memory.set_meta(conn, "reembed_model", model)
+    memory.set_meta(conn, "reembed_cursor", "invalid")
+    conn.commit()
+    monkeypatch.setattr(memory._processor, "get_model", lambda *args: object())
+    monkeypatch.setattr(memory, "embed_passage", lambda *args: [0.0] * 768)
+    assert memory.main(["--reembed"]) == 1
+    output = capsys.readouterr()
+    assert not output.out and "invalid reembed_cursor" in output.err
+    assert memory.get_meta(conn, "reembed_cursor") == "invalid"
+    assert memory.get_meta(conn, "embed_model") is None

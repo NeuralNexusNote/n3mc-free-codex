@@ -22,6 +22,7 @@ if __name__ == "__main__":
 import argparse
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import subprocess
@@ -1449,7 +1450,7 @@ def _save_record(content, agent_name=None, session_id=None, turn_id=None, local_
     cfg = get_config()
     target = _connection_target(cfg)
     if target:
-        body = {"content": content, "agent_name": agent_name or AGENT_NAME,
+        body = {"content": content, "agent_name": AGENT_NAME if agent_name is None else agent_name,
                 "local_id": local_id or cfg["local_id"]}
         for key, value in (("session_id", session_id), ("turn_id", turn_id), ("project", project)):
             if value is not None:
@@ -1502,6 +1503,49 @@ def _placeholder(body_line, notices):
     return "\n".join(out)
 
 
+def _valid_search_hit(row):
+    if not isinstance(row, dict) or not isinstance(row.get("content"), str):
+        return False
+    score = row.get("score")
+    try:
+        return (isinstance(row.get("timestamp"), str)
+                and type(score) in (int, float) and math.isfinite(score))
+    except OverflowError:
+        return False
+
+
+def _search_exchanges(response, notices):
+    raw_pairs = response.get("pairs")
+    raw_omitted = response.get("pairs_omitted")
+    malformed = False
+    pairs, omitted = {}, {}
+    if isinstance(raw_pairs, dict):
+        for turn, chunks in raw_pairs.items():
+            if not isinstance(chunks, list):
+                malformed = True
+                continue
+            valid = [chunk for chunk in chunks if isinstance(chunk, dict)
+                     and isinstance(chunk.get("content"), str)]
+            malformed |= len(valid) != len(chunks)
+            if valid:
+                pairs[turn] = valid
+    elif raw_pairs is not None:
+        malformed = True
+
+    if isinstance(raw_omitted, dict):
+        for turn, count in raw_omitted.items():
+            if type(count) is not int or count < 0:
+                malformed = True
+            elif count:
+                omitted[turn] = count
+    elif raw_omitted is not None:
+        malformed = True
+
+    if malformed:
+        notices.append("Supplementary exchanges could not be displayed in full.")
+    return pairs, omitted
+
+
 def _search_text(query, session_id=None, since=None, until=None, *, cfg=None):
     cfg = get_config() if cfg is None else cfg
     query = sanitize_surrogates(query or "")[:cfg["search_query_max_chars"]]
@@ -1527,16 +1571,14 @@ def _search_text(query, session_id=None, since=None, until=None, *, cfg=None):
         r = _post("/search", body, port=port) if port else _post("/search", body)
         if not isinstance(r, dict) or not isinstance(r.get("results"), list):
             raise ValueError("invalid search response")
-        results = r["results"]
-        pairs, omitted = r.get("pairs", {}), r.get("pairs_omitted", {})
-        try:
-            return render_memory_context(query, results, pairs, omitted, notices, connected=bool(target))
-        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
-            if not pairs and not omitted:
-                raise
-            # A malformed exchange must not hide the ranked hits.
-            warning = "Supplementary exchanges could not be displayed."
-            return render_memory_context(query, results, notices=[*notices, warning])
+        results = [row for row in r["results"] if _valid_search_hit(row)]
+        if len(results) != len(r["results"]):
+            if not results:
+                raise ValueError("no valid ranked search results")
+            notices.append("Some ranked search results could not be displayed.")
+        pairs, omitted = _search_exchanges(r, notices)
+        context = render_memory_context(query, results, pairs, omitted, notices, connected=bool(target))
+        return sanitize_surrogates(context)
     except Exception as e:  # noqa: BLE001
         print(f"N3MC: search failed ({type(e).__name__}).", file=sys.stderr)
         return _placeholder(f"_(memory search unavailable: {type(e).__name__})_", notices)
@@ -1545,10 +1587,8 @@ def _search_text(query, session_id=None, since=None, until=None, *, cfg=None):
 # ============================================================ hook helpers
 
 def _read_stdin_text():
-    try:
-        return sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
-        return sys.stdin.read()
+    raw = getattr(sys.stdin, "buffer", None)
+    return sys.stdin.read() if raw is None else raw.read().decode("utf-8")
 
 
 def _housekeeping():
@@ -1656,11 +1696,13 @@ def cmd_recall_thread(turn_id, before=2, after=2, fmt="text"):
                 SELECT turns.turn_id FROM turns JOIN memories AS first ON first.rowid = turns.lo
                 WHERE first.session_id = ?
             """
+            # SQLite LIMIT parameters must fit a signed 64-bit integer.
+            max_limit = (1 << 63) - 1
             previous = conn.execute(same_session_bounds + " AND hi < ? ORDER BY hi DESC LIMIT ?",
-                                    (turn_id, session, anchor["lo"], max(0, before)))
+                                    (turn_id, session, anchor["lo"], min(max_limit, max(0, before))))
             turns.extend(row[0] for row in previous)
             following = conn.execute(same_session_bounds + " AND lo > ? ORDER BY lo ASC LIMIT ?",
-                                     (turn_id, session, anchor["hi"], max(0, after)))
+                                     (turn_id, session, anchor["hi"], min(max_limit, max(0, after))))
             turns.extend(row[0] for row in following)
         q = ",".join("?" * len(turns))
         rows = [dict(row) for row in conn.execute(
@@ -1701,7 +1743,11 @@ def cmd_show_turn(turn_id):
 
 def cmd_buffer(text, agent_id=None):
     if text == "-":
-        text = _read_stdin_text()
+        try:
+            text = _read_stdin_text()
+        except UnicodeDecodeError:
+            print("N3MC: --buffer: stdin must be valid UTF-8.", file=sys.stderr)
+            return 1
     text = sanitize_surrogates(text or "")
     if not text.strip():
         print("Skipped (empty).")
@@ -1795,7 +1841,13 @@ def cmd_reembed():
         total = count_memories(conn)
         cursor = 0
         if get_meta(conn, "reembed_model") == model:
-            cursor = int(get_meta(conn, "reembed_cursor", 0))
+            try:
+                cursor = int(get_meta(conn, "reembed_cursor", 0))
+                if not 0 <= cursor < 1 << 63:
+                    raise ValueError("cursor outside SQLite rowid range")
+            except ValueError:
+                print("N3MC: --reembed: invalid reembed_cursor in database metadata.", file=sys.stderr)
+                return 1
         else:
             set_meta(conn, "reembed_model", model)
             set_meta(conn, "reembed_cursor", 0)
