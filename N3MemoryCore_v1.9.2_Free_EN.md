@@ -1,4 +1,4 @@
-# N3MemoryCore Free for Codex v1.9.1 [Immutable Memory]
+# N3MemoryCore Free for Codex v1.9.2 [Immutable Memory]
 > A NeuralNexusNote™ product
 
 A local conversation memory for Codex. Two command hooks record the turn and retrieve related memories. SQLite commits each standalone save synchronously.
@@ -30,16 +30,16 @@ By using this software, you agree to the terms above.
 ### Generate in Codex
 
 1. Install Python 3.10 or newer and use a Codex client with command hooks. Open a dedicated empty folder or the existing Free Codex checkout in Codex. The editable installation continues to use that folder.
-2. Place this specification in the folder. Ask Codex: “Implement N3MemoryCore Free for Codex according to this specification. Generate the code in this folder and run the isolated tests.”
-3. Codex checks the destination, generates the files, and runs §6–§7 against disposable data. For an existing checkout, preserve unrelated files and recoverable local changes. Do not register the user's hooks as part of code-only regeneration.
-4. For a complete setup, Codex installs and registers from the authorized dedicated folder:
+2. Place this specification in the folder. Ask Codex: “Implement N3MemoryCore Free for Codex according to this specification. Generate the code here, install it in the selected Python environment, then register and verify both hooks in this Codex user's settings. Use disposable test data and show me the hooks to trust after registration.”
+3. Codex checks the destination, generates the files, and uses disposable data for checks that can run before hook trust. For an existing checkout, preserve unrelated files and recoverable local changes. The request above proceeds through step 4. Stop after generation and isolated testing if the user explicitly requests that scope.
+4. For a complete setup, Codex installs the package and registers the user's hooks from the authorized dedicated folder using the same Python interpreter. If using a virtual environment, substitute the absolute path to its Python executable:
 
 ```bash
 python -m pip install -e ".[test]"
-n3mc-free-codex --init
+python -m n3memorycore_free_codex.n3memory --init
 ```
 
-5. On Windows desktop, after registration, open the hidden icons menu in the taskbar, right-click the ChatGPT or Codex icon, choose Quit, and reopen the app. The user inspects and trusts both Free Codex hooks in Codex **Settings → Hooks** (CLI: `/hooks`). Reply in the setup chat with “I restarted and trusted both hooks.” Without waiting for another request, Codex runs §6 (including §6.1–§6.2), then §7, and reports the evidence for automatic saving in a new chat and cross-chat recall. The first semantic search may need to download the multilingual embedding model.
+5. On Windows desktop, after registration, open the hidden icons menu in the taskbar, right-click the ChatGPT or Codex icon, choose Quit, and reopen the app. The user inspects and trusts both Free Codex hooks in Codex **Settings → Hooks** (CLI: `/hooks`). If the hooks list is empty, follow the desktop troubleshooting steps in §4. Reply in the setup chat with “I restarted and trusted both hooks.” Without waiting for another request, Codex runs §6 (including §6.1–§6.2), then §7, and reports the evidence for automatic saving in a new chat and cross-chat recall. The first semantic search may need to download the multilingual embedding model.
 
 ### Installation destination and prerequisites
 
@@ -52,7 +52,9 @@ Before implementation, run `python --version` or `python3 --version` and confirm
 3. Sign out of Windows and sign in again, or restart the PC, so newly started applications see the updated PATH. Closing only the Codex window can leave a background process running with the old environment.
 4. In a new terminal, confirm `python --version`, reopen Codex in the same dedicated folder, and resume setup.
 
-Do not install Python itself from the implementing session. Explain that the user must refresh the Windows session after installing it. Install Python packages automatically with the selected working interpreter. For a complete setup, Codex runs `python -m pip install -e ".[test]"` and `n3mc-free-codex --init`, verifies both registrations, and shows their location and commands. Do not leave registration or executable checks as manual tasks for the user. Code-only regeneration uses disposable configuration and does not register real hooks. The user reviews and trusts the hooks; Codex must not grant or bypass that trust.
+Do not install Python itself from the implementing session. Explain that the user must refresh the Windows session after installing it. Install Python packages automatically with the selected working interpreter. For a complete setup, Codex runs `python -m pip install -e ".[test]"` and `python -m n3memorycore_free_codex.n3memory --init`, verifies both registrations, and shows their location and commands. Do not leave registration or executable checks as manual tasks for the user. Code-only regeneration uses disposable configuration and does not register real hooks. The user reviews and trusts the hooks; Codex must not grant or bypass that trust.
+
+Register with the same user and `CODEX_HOME` as the app, using a process that does not inherit the test override `N3MC_CODEX_HOOKS_PATH`. Read back the absolute path of `hooks.json` and exactly one entry for this product under each of `UserPromptSubmit` and `Stop` before guiding the user through restart and trust. If registration fails, report the exit status, error, and intended destination. Dependency or DB initialization errors can occur before the hooks file is written.
 
 On Windows, after installing dependencies, check the x64 Visual C++ runtime with:
 
@@ -102,7 +104,7 @@ Implement local, durable episodic memory for Codex. Keep conversation text as sp
 | Data root override | `N3MC_HOME` | `N3MC_FREE_CODEX_HOME` |
 | Default loopback port | `18520` | `18526` |
 | Hook status message | `—` | `N3MC-Free-Codex memory` |
-| Version | `1.9.1` | `1.9.1` |
+| Version | `1.9.1` | `1.9.2` |
 
 ```text
 n3mc-free-codex/
@@ -110,7 +112,7 @@ n3mc-free-codex/
 ├── pyproject.toml
 ├── README.md / README_JP.md
 ├── LICENSE / NOTICE / CHANGELOG.md / PHILOSOPHY.md
-├── N3MemoryCore_v1.9.1_Free_EN.md / _JP.md
+├── N3MemoryCore_v1.9.2_Free_EN.md / _JP.md
 ├── n3memorycore_free_codex/
 │   ├── __init__.py
 │   ├── paths.py
@@ -144,7 +146,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "n3memorycore-free-codex"
-version = "1.9.1"
+version = "1.9.2"
 description = "Persistent hybrid-search memory store for Codex (Free Edition)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -249,7 +251,7 @@ text_to_embed = "query: " + keyword
 
 The embedding model is the `embed_model` field in `~/.n3mc-free-codex/config.json` (default `intfloat/multilingual-e5-base`, written into the file on first start). There is **no environment-variable override**: `config.json` always contains `embed_model`, so a `$N3MC_EMBED_MODEL` variable would never take effect (do not add one), and §3 allows the model to be changed only by a human editing `config.json`.
 
-**Load failures**: if the model cannot be loaded (offline first start, no Hugging Face cache, a misspelled `embed_model`), do not retry the load on every save and search. After a failure, `get_model()` raises immediately without trying again for 60 seconds (`MODEL_RETRY_SECONDS`), so saves fall back to records without vectors (re-indexed by a later `--repair`) and searches run keyword-only with the `embed_query` warning (§5) instead of each waiting for a download attempt. Print one line to stderr per failed attempt (at most once a minute).
+**Load failures**: if the model cannot be loaded (offline first start, no Hugging Face cache, a misspelled `embed_model`), do not retry the load on every save and search. After a failure, `get_model()` skips retrying that model for 60 seconds (`MODEL_RETRY_SECONDS`) and can try a different model immediately. During the retry delay, so saves fall back to records without vectors (re-indexed by a later `--repair`) and searches run keyword-only with the `embed_query` warning (§5) instead of each waiting for a download attempt. Print one line to stderr per failed attempt (at most once a minute for the same model).
 
 Examples a user might configure:
 
@@ -976,6 +978,8 @@ Merge only handlers for this edition and entry point. Recognize the legacy Free 
 
 After registration, review and trust both handlers in Codex **Settings → Hooks**, or run `/hooks` in the interactive CLI. The user performs this step. Work in a new chat outside the installation checkout and verify both save and cross-chat search in §6. When a user requests source regeneration alone, use isolated settings and data for tests. Run registration against the user's actual settings only with their authorization. Free uses hooks and does not register an MCP server.
 
+With zero local projects, some desktop builds can show **No hooks found** even when both entries exist in the user `hooks.json`. First verify both entries in the file for the same user and `CODEX_HOME` as the app. If the entries are present, add or open a local folder as a project and reopen **Settings → Hooks**. If the desktop list remains empty, open `/hooks` in the interactive CLI with the same user and `CODEX_HOME` to review and trust both handlers. If the interactive CLI lists Installed 1 / Active 1 for both events, proceed with §6 and §7 using the existing active registrations. Verify registration, trust, and live saving and recall separately.
+
 ### Input and output
 
 Each hook reads one UTF-8 JSON object from stdin. Validate `hook_event_name` when present. Use `session_id`, or `thread_id` when absent. Reject differing non-null values, empty IDs, and missing or empty `turn_id`. The body is `prompt` for `UserPromptSubmit` and `last_assistant_message` for `Stop`. Null or blank bodies have no search or DB write. Sanitize isolated surrogates on input. The legacy Claude Code system-text prefix filter is removed. Conversation text that happens to start with those strings is ordinary user content.
@@ -1196,9 +1200,9 @@ After computing scores, `hybrid_search` shapes the results in the following orde
 
 ---
 
-## 6. Autonomous evaluation ([N3MC v1.9.1 Evidence Report])
+## 6. Autonomous evaluation ([N3MC v1.9.2 Evidence Report])
 
-After implementation, autonomously run the following tests, resolve failures, and report the results in the **N3MC v1.9.1 Evidence Report**, aiming for full marks (⭐⭐⭐⭐⭐). Run §7 automated tests as well. Perform test inputs and verification commands yourself wherever the available tools permit; do not delegate executable checks to the user.
+After implementation, autonomously run the following tests, resolve failures, and report the results in the **N3MC v1.9.2 Evidence Report**, aiming for full marks (⭐⭐⭐⭐⭐). Run §7 automated tests as well. Perform test inputs and verification commands yourself wherever the available tools permit; do not delegate executable checks to the user.
 
 **Completion criteria**: Execute the isolated tests, verify hook registration, and, after the user has reviewed and trusted the hooks, verify live hook operation and cross-chat recall. Record the evidence and results for each §6 item and the §7 test results in the Evidence Report. Report registration, trust, live operation, and automated tests separately. An unavailable test remains a required unfinished item; state the blocker and rerun it when the prerequisite becomes available. Time pressure, tool limitations or a passing subset do not permit deletion or waiver of a check. Full marks are a target, not a predetermined result: explicitly report failures, skipped tests, and unverified steps, and do not claim full marks or complete verification while required checks remain failed or unverified.
 
@@ -1409,7 +1413,7 @@ Embeddings are replaced with deterministic fake vectors built from `zlib.crc32` 
 | `TestTimeBounds` | A date-only `--since` is local midnight converted to UTC (with a fixed non-UTC time zone); an offset value is honoured; `T` and space separators give the same bound; `yesterday` exits with status 2 and an error line; `since > until` is an error; when `astimezone()` raises `OSError` (replaced), `--since 1969-01-01` and `--until 9999-12-31` raise no exception and are read as UTC |
 | `TestDbCorrupt` | Two corruptions give two backups (`n3memory.db.corrupt-<time>.bak`) with their `-wal` / `-shm` moved alongside, not deleted; the `db_corrupt` notice appears; `quick_check` runs once per process; a file of garbage and a DB with a damaged first page are set aside on the next direct save and on the startup check, with the `db_corrupt` notice; `OperationalError` and the sqlite-vec failure are not treated as corruption |
 | `TestSaveFailedNotice` | After one direct save fails (`save_failed` is set), a later save through the server (`/buffer` replaced by a fake that answers `ok`) removes the notice, and so does one that answers `skipped` |
-| `TestModelRetry` | After a failed model load, `get_model()` does not try again for 60 seconds (load function replaced by a fake); `$N3MC_EMBED_MODEL` has no effect |
+| `TestModelRetry` | After a failed model load, `get_model()` does not retry that model for 60 seconds and can try another model immediately (load function replaced by a fake); `$N3MC_EMBED_MODEL` has no effect |
 | `TestPackaging` | `psutil` is listed in `pyproject.toml` `dependencies` |
 | `TestWeakMatches` | With one result passing the floors and `min_results: 3`, two weak rows are added, ordered by `filter_score`, marked `"weak": true` in `/search` and placed after the normal row; a candidate below `vector_min_cos` is added with its actual cos (its `filter_score` uses that cos); `min_results: 0` adds nothing; nothing is added when enough results pass; `search_result_limit` smaller than `min_results` caps the total; a weak candidate identical to a result row, or from a `turn_id` that already has 2 rows, is skipped; a candidate with `filter_score` below `1e-6` (an orthogonal vector) is never added; weak rows are not used for `pairs`; an empty query returns no weak rows |
 
@@ -1473,7 +1477,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 Set the model to **Sol** and paste the following:
 
 ```
-Please implement N3MemoryCore according to this specification. Complete the authorized installation and hook registration, show me the two hooks to review and trust, then autonomously execute sections 6 (including 6.1–6.2) and 7 and report the N3MC v1.9.1 Evidence Report. Run the test inputs and verification commands yourself.
+Please implement N3MemoryCore according to this specification. Complete the authorized installation and hook registration, show me the two hooks to review and trust, then autonomously execute sections 6 (including 6.1–6.2) and 7 and report the N3MC v1.9.2 Evidence Report. Run the test inputs and verification commands yourself.
 ```
 
 Codex completes generation, isolated checks, installation and registration within the authorized scope. The user reviews and trusts the two hooks; Codex then performs the live and automated evaluations. Do not substitute code generation or CLI smoke tests for verified automatic memory. Proceed to Phase 2 after reading the Evidence Report.

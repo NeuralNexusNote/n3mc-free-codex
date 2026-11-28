@@ -21,8 +21,7 @@ MODEL_RETRY_SECONDS = 60
 
 _model = None
 _model_name = None
-_model_failed_at = None
-_model_error = None
+_model_failures = {}
 _model_lock = threading.Lock()
 _warned_embed = False
 
@@ -44,24 +43,24 @@ def _load_model(name):
 
 
 def get_model(name=None):
-    """Load the embedding model lazily. After a failed load, do not retry for MODEL_RETRY_SECONDS."""
-    global _model, _model_name, _model_failed_at, _model_error
+    """Load the model lazily and apply the retry delay to that model only."""
+    global _model, _model_name
     name = name or _current_model_name()
     with _model_lock:
         if _model is not None and _model_name == name:
             return _model
-        if _model_failed_at is not None and time.monotonic() - _model_failed_at < MODEL_RETRY_SECONDS:
-            raise RuntimeError(f"embedding model unavailable ({_model_error})")
+        failure = _model_failures.get(name)
+        if failure and time.monotonic() - failure[0] < MODEL_RETRY_SECONDS:
+            raise RuntimeError(f"embedding model unavailable ({failure[1]})")
         try:
             _model = _load_model(name)
             _model_name = name
-            _model_failed_at = None
+            _model_failures.pop(name, None)
             return _model
         except Exception as e:  # noqa: BLE001
-            _model = None
-            _model_failed_at = time.monotonic()
-            _model_error = f"{type(e).__name__}: {e}"
-            print(f"N3MC: could not load embedding model {name}: {_model_error}", file=sys.stderr)
+            error = f"{type(e).__name__}: {e}"
+            _model_failures[name] = time.monotonic(), error
+            print(f"N3MC: could not load embedding model {name}: {error}", file=sys.stderr)
             raise
 
 
