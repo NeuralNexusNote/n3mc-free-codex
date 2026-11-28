@@ -250,7 +250,13 @@ def test_list_content_keeps_four_tsv_columns(conn, cfg, capsys):
     assert line.split("\t")[-1] == "key value second line"
 
 
-@pytest.mark.parametrize("prompt", ["この会話の保存はやめてください", "Please don’t save this reply"])
+@pytest.mark.parametrize("prompt", [
+    "この会話の保存はやめてください",
+    "Please don’t save this reply",
+    "このターンを記録しないでください\u2028別の行です",
+    "Do not store the example as a file\rPlease don’t save this reply.",
+    "Please don’t save this reply\u2029Continue with the answer.",
+])
 def test_explicit_privacy_variants(conn, monkeypatch, prompt, capsys):
     monkeypatch.setattr(memory, "_search_text", lambda *a, **k: pytest.fail("excluded prompt reached search"))
     assert "excluded" in hook(PROMPT, prompt)["systemMessage"]

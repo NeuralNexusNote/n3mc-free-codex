@@ -20,14 +20,14 @@ from pathlib import Path
 from . import n3memory as memory
 from .core.processor import sanitize_surrogates
 
+_JA_REQUEST_END = r"(?=[。！!？?、,\s]*$|[。！!？?\r\n\u0085\u2028\u2029])"
 _NO_SAVE = re.compile(
     r"(?:保存|記録|記憶)(?:を|は)?(?:しないで(?:ください)?|しなくて(?:も)?(?:いい|よい|大丈夫)|禁止|不要|やめて(?:ください)?|止めて(?:ください)?)"
-    r"(?=[。！!、,\s]*$|[。！!\n])|"
-    r"(?:記憶に|メモリに)残さないで(?:ください)?(?=[。！!、,\s]*$|[。！!\n])|"
-    r"覚えないで(?:ください)?(?=[。！!、,\s]*$|[。！!\n])|"
-    r"(?:^|[.!?\n]\s*)(?:please\s+)?(?:do not|don['’]t|never)\s+"
+    + _JA_REQUEST_END + "|"
+    + r"(?:(?:記憶に|メモリに)残さないで|覚えないで)(?:ください)?" + _JA_REQUEST_END + "|"
+    + r"(?:^|[.!?\r\n\u0085\u2028\u2029]\s*)(?:please\s+)?(?:do not|don['’]t|never)\s+"
     r"(?:save|store|record|remember)\s+(?:(?:this|that)(?:\s+(?:reply|message|turn|conversation|chat))?|anything|our conversation|my (?:message|reply))"
-    r"(?:\s+(?:in|to)\s+memory)?(?=\s*(?:[.!?,;]|$))|"
+    r"(?:\s+(?:in|to)\s+memory)?(?=\s*(?:[.!?,;\r\n\u0085\u2028\u2029]|$))|"
     r"(?:off the record|do not add (?:this|that) to memory)", re.I)
 _SECRETS = re.compile(
     r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|"
@@ -80,7 +80,7 @@ def _strings(value):
             yield from _strings(item)
 
 
-def handle(event, raw):
+def _read_event(event, raw):
     payload = sanitize_surrogates(json.loads(raw))
     if not isinstance(payload, dict):
         raise ValueError("hook input must be a JSON object")
@@ -92,16 +92,20 @@ def handle(event, raw):
     message = payload.get(body_key)
     if message is not None and not isinstance(message, str):
         raise ValueError(f"{body_key} must be text or null")
+    return payload, session, turn, message
+
+
+def handle(event, raw):
+    payload, session, turn, message = _read_event(event, raw)
+    is_prompt = event == "UserPromptSubmit"
 
     skip_key = hashlib.sha256(f"{session}\0{turn}".encode("utf-8")).hexdigest()
     marker = Path(memory.MEMORY_DIR) / f"skip_{skip_key}"
-    if marker.exists():
-        print("N3MC: turn excluded from memory.", file=_sys.stderr)
-        return {"systemMessage": "N3MC: turn excluded from memory."}
-    if any(_has_secrets(item) for item in _strings(payload)) or (
-        is_prompt and message and _NO_SAVE.search(message)
+    previously_excluded = marker.exists()
+    if previously_excluded or (is_prompt and message and _NO_SAVE.search(message)) or any(
+        _has_secrets(item) for item in _strings(payload)
     ):
-        if is_prompt:
+        if is_prompt and not previously_excluded:
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.touch()
         print("N3MC: turn excluded from memory.", file=_sys.stderr)

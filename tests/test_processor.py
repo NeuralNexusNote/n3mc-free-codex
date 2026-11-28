@@ -73,6 +73,26 @@ class TestPurification:
 
 
 class TestEmbedding:
+    def test_cached_snapshot_after_hub_connection_failure(self, monkeypatch, tmp_path):
+        import huggingface_hub
+        import sentence_transformers
+
+        def load(source, *, device):
+            assert device == "cpu"
+            if source == p.DEFAULT_MODEL:
+                raise ConnectionError("offline")
+            assert source == str(tmp_path)
+            return model
+
+        def cached(name, *, local_files_only):
+            assert name == p.DEFAULT_MODEL and local_files_only
+            return str(tmp_path)
+
+        model = object()
+        monkeypatch.setattr(sentence_transformers, "SentenceTransformer", load)
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", cached)
+        assert p._load_model(p.DEFAULT_MODEL) is model
+
     def test_passage_embedding_shape(self):
         assert len(p.embed_passage("hello world")) == 768
 

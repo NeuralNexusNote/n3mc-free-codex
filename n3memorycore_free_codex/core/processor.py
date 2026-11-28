@@ -31,7 +31,16 @@ _warned_embed = False
 
 def _load_model(name):
     from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(name, device="cpu")
+    try:
+        return SentenceTransformer(name, device="cpu")
+    except Exception as load_error:
+        # Hub metadata requests can fail even when the complete model is cached.
+        from huggingface_hub import snapshot_download
+        try:
+            cached_path = snapshot_download(name, local_files_only=True)
+        except Exception:
+            raise load_error from None
+        return SentenceTransformer(cached_path, device="cpu")
 
 
 def get_model(name=None):

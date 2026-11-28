@@ -92,7 +92,9 @@ def test_valid_hits_survive_bad_supplement_and_unexpected_save_failure(monkeypat
     row = {"score": 0.7, "timestamp": "2026-11-25T00:00:00+00:00", "content": "prior evidence"}
     monkeypatch.setattr(n3m, "_use_server", lambda: True)
     monkeypatch.setattr(n3m, "_post", lambda *args, **kwargs: {
-        "results": [row], "pairs": {"old": [{}]}, "pairs_omitted": {}
+        "results": [{"content": "broken ranked row"}, row],
+        "pairs": {"old": [{}, {"content": "surviving reply \ud800😀"}], "broken": {"content": "wrong shape"}},
+        "pairs_omitted": {"old": 2, "broken": "invalid count"},
     })
 
     def failed_save(*args):
@@ -102,8 +104,14 @@ def test_valid_hits_survive_bad_supplement_and_unexpected_save_failure(monkeypat
     result = codex_entry.handle("UserPromptSubmit", json.dumps({
         "session_id": "chat", "turn_id": "turn", "prompt": "Find the evidence"
     }))
-    assert "prior evidence" in result["hookSpecificOutput"]["additionalContext"]
-    assert "Supplementary exchanges could not be displayed" in result["hookSpecificOutput"]["additionalContext"]
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert context.encode("utf-8").decode("utf-8") == context
+    assert "prior evidence" in context and "surviving reply 😀" in context
+    assert "broken ranked row" not in context and "wrong shape" not in context
+    assert "Some ranked search results could not be displayed." in context
+    assert "Supplementary exchanges could not be displayed in full." in context
+    assert "2 more chunk(s)" in context and "--show-turn old" in context
+    assert "memory search unavailable" not in context
     assert "could not save" in result["systemMessage"]
 
 
