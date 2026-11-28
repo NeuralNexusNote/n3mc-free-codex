@@ -70,6 +70,8 @@ If Windows asks for UAC approval, tell the user to approve that operating-system
 
 Keep the model cache for subsequent starts; the first model download may take several minutes. Explain a download or startup wait rather than declaring a successful installation before registration and verification have completed.
 
+If loading by model name fails, look up the same model’s local snapshot without network access and load from its path. Verify that a complete cache supports CPU embedding during a network outage. If the cache cannot be loaded, follow the model load failure handling described below.
+
 Do not present manual `--buffer`, `--search` or `--list` commands as a replacement for automatic saving or for checks Codex can run itself. Commands in this specification are instructions and examples for the implementing agent.
 
 ### Install from source
@@ -918,6 +920,7 @@ python -m n3memorycore_free_codex.n3memory --recall-thread <turn_id> [--before N
 
 - Returns the target `turn_id` plus the N preceding and N following turns, in chronological order.
 - Defaults: `--before 2`, `--after 2`.
+- Return every selected row in rowid order even when the turn count exceeds the SQLite bound-variable limit. For regression testing, set the connection limit to 8 and verify the count and order of 12 turns from one conversation.
 - Uses the existing `idx_memories_turn_id` index. No new index required.
 - Output format matches `--list` (tab-separated; `--format jsonl` supported), ending with `Total: N records`.
 - **Which rows**: take the smallest and the largest `rowid` of the target turn. The N preceding turns are the N distinct `turn_id`s (not NULL, not the target) with the largest `MAX(rowid)` below the target's smallest rowid; the N following turns are those with the smallest `MIN(rowid)` above the target's largest rowid. Rows whose `turn_id` is NULL are never counted as a turn. Print every row of the selected turns in `rowid` order. When there is no DB file, print `No DB found at <path>` to stderr.

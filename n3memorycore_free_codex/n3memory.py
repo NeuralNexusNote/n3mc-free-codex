@@ -1685,29 +1685,32 @@ def cmd_recall_thread(turn_id, before=2, after=2, fmt="text"):
         session = conn.execute(
             "SELECT session_id FROM memories WHERE rowid=?", (anchor["lo"],)
         ).fetchone()["session_id"] if "session_id" in columns else None
-        turns = [turn_id]
         if session:
-            same_session_bounds = """
+            sql = """
                 WITH turns AS (
                     SELECT turn_id, MIN(rowid) AS lo, MAX(rowid) AS hi
                     FROM memories WHERE turn_id IS NOT NULL AND turn_id != ?
                     GROUP BY turn_id
+                ), same_session AS (
+                    SELECT turns.* FROM turns JOIN memories AS first ON first.rowid = turns.lo
+                    WHERE first.session_id = ?
+                ), previous AS (
+                    SELECT turn_id FROM same_session WHERE hi < ? ORDER BY hi DESC LIMIT ?
+                ), following AS (
+                    SELECT turn_id FROM same_session WHERE lo > ? ORDER BY lo LIMIT ?
                 )
-                SELECT turns.turn_id FROM turns JOIN memories AS first ON first.rowid = turns.lo
-                WHERE first.session_id = ?
+                SELECT * FROM memories WHERE turn_id IN (
+                    SELECT ? UNION ALL SELECT turn_id FROM previous UNION ALL SELECT turn_id FROM following
+                ) ORDER BY rowid
             """
             # SQLite LIMIT parameters must fit a signed 64-bit integer.
             max_limit = (1 << 63) - 1
-            previous = conn.execute(same_session_bounds + " AND hi < ? ORDER BY hi DESC LIMIT ?",
-                                    (turn_id, session, anchor["lo"], min(max_limit, max(0, before))))
-            turns.extend(row[0] for row in previous)
-            following = conn.execute(same_session_bounds + " AND lo > ? ORDER BY lo ASC LIMIT ?",
-                                     (turn_id, session, anchor["hi"], min(max_limit, max(0, after))))
-            turns.extend(row[0] for row in following)
-        q = ",".join("?" * len(turns))
-        rows = [dict(row) for row in conn.execute(
-            f"SELECT * FROM memories WHERE turn_id IN ({q}) ORDER BY rowid", turns
-        )]
+            args = (turn_id, session, anchor["lo"], min(max_limit, max(0, before)),
+                    anchor["hi"], min(max_limit, max(0, after)), turn_id)
+        else:
+            sql = "SELECT * FROM memories WHERE turn_id=? ORDER BY rowid"
+            args = (turn_id,)
+        rows = [dict(row) for row in conn.execute(sql, args)]
     finally:
         conn.close()
     for r in rows:

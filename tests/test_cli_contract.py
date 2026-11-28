@@ -147,6 +147,27 @@ def test_recall_thread_accepts_limits_larger_than_a_sqlite_integer(conn, capsys)
     assert output.err == "Total: 3 records\n"
 
 
+@pytest.mark.skipif(not hasattr(sqlite3.Connection, "setlimit"), reason="setlimit requires Python 3.11")
+def test_recall_thread_window_can_exceed_sqlite_variable_limit(conn, monkeypatch, capsys):
+    for i in range(12):
+        conn.execute("INSERT INTO memories (id, content, timestamp, owner_id, session_id, turn_id) "
+                     "VALUES (?, 'record', '2026-11-28', 'owner', 'session', ?)", (str(i), str(i)))
+    conn.commit()
+    open_db = memory._read_db_if_exists
+
+    def open_limited():
+        reader = open_db()
+        reader.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 8)
+        return reader
+
+    monkeypatch.setattr(memory, "_read_db_if_exists", open_limited)
+    assert memory.main(["--recall-thread", "5", "--before", "20", "--after", "20",
+                        "--format", "jsonl"]) == 0
+    output = capsys.readouterr()
+    assert [json.loads(row)["turn_id"] for row in output.out.splitlines()] == list(map(str, range(12)))
+    assert output.err == "Total: 12 records\n"
+
+
 @pytest.mark.parametrize("response", [{"status": "error"}, {"status": "ok", "count": -1}, {}])
 def test_invalid_repair_response_is_a_cli_failure(monkeypatch, capsys, response):
     monkeypatch.setattr(memory, "_use_server", lambda: True)
